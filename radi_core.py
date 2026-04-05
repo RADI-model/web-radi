@@ -682,7 +682,7 @@ class RADIModel:
             # Build rate law based on rate_type (vectorized over all depths)
             if rxn.rate_type == "mass_action":
                 # R = k * product(c[reactant_i]^stoich_i for all reactants)
-                rate = np.full(self.Nz, rxn.rate_constant)
+                rate = np.full(self.Nz, float(rxn.rate_constant))
                 for reactant_name, stoich in rxn.reactants:
                     j_reactant = self.species_idx[reactant_name]
                     c_reactant = np.maximum(u_matrix[j_reactant, :], 1e-30)
@@ -696,7 +696,7 @@ class RADIModel:
                 # Must multiply by substrate (first reactant) to match RADI.jl
                 j_mon = self.species_idx[rxn.monod_species]
                 c_mon = u_matrix[j_mon, :]
-                rate = rxn.rate_constant * c_mon / (rxn.half_saturation + c_mon)
+                rate = float(rxn.rate_constant) * c_mon / (float(rxn.half_saturation) + c_mon)
                 # Multiply by first reactant (substrate) concentration
                 if rxn.reactants:
                     j_sub = self.species_idx[rxn.reactants[0][0]]
@@ -708,7 +708,7 @@ class RADIModel:
                 # Must multiply by substrate (first reactant) to match RADI.jl
                 j_mon = self.species_idx[rxn.monod_species]
                 c_mon = u_matrix[j_mon, :]
-                rate = rxn.rate_constant * c_mon / (rxn.half_saturation + c_mon)
+                rate = float(rxn.rate_constant) * c_mon / (float(rxn.half_saturation) + c_mon)
                 # Multiply by first reactant (substrate) concentration
                 if rxn.reactants:
                     j_sub = self.species_idx[rxn.reactants[0][0]]
@@ -719,7 +719,7 @@ class RADIModel:
                 for inh_name, KI in rxn.inhibitors:
                     j_inh = self.species_idx[inh_name]
                     c_inh = u_matrix[j_inh, :]
-                    rate *= KI / (KI + c_inh)
+                    rate *= float(KI) / (float(KI) + c_inh)
 
             elif rxn.rate_type == "saturation":
                 # For CaCO3 dissolution (saturation-state dependent)
