@@ -112,6 +112,12 @@ class Environment:
     RN: float = 0.16  # N:C
     RP: float = 0.01  # P:C
 
+    # DBL thickness override (if set, use directly instead of computing from current speed)
+    dbl_thickness_override: Optional[float] = None  # [m]
+
+    # Output time step control for transient simulations
+    t_eval_points: Optional[int] = None  # number of output time points
+
 
 # ============================================================================
 # DIFFUSIVITY LIBRARY (Boudreau 1997)
@@ -234,6 +240,9 @@ def dbl_thickness(D_w: float, U: float) -> float:
     """
     Diffusive boundary layer thickness.
 
+    Boudreau & Jorgensen (2001) parameterization:
+    dbl = D_w / (0.00138 * U^0.567)
+
     Parameters
     ----------
     D_w : float
@@ -249,12 +258,12 @@ def dbl_thickness(D_w: float, U: float) -> float:
     if U < 1e-10:
         return 1.0e-3  # 1 mm default
 
-    # Simplified Boudreau & Jorgensen parameterization
-    # dbl ≈ D_w / (0.0096 * U) [rough empirical fit]
-    # For now, use a simpler approach: cap at reasonable value
+    # Boudreau & Jorgensen (2001) parameterization
+    # dbl = D_w / (0.00138 * U^0.567)
+    # where D_w is in m²/s and U is in m/s, result in meters
     D_w_m2s = D_w / 3.1557e7  # convert m²/yr to m²/s
-    dbl = D_w_m2s / (1.0e-5 * U + 1e-8)
-    return max(1.0e-4, min(dbl, 5.0e-3))  # clamp [0.1 mm, 5 mm]
+    dbl = D_w_m2s / (0.00138 * U**0.567)
+    return dbl
 
 
 class CarbonateSystem:
@@ -672,8 +681,12 @@ class RADIModel:
         for rxn in self.reaction_list:
             # Build rate law based on rate_type (vectorized over all depths)
             if rxn.rate_type == "mass_action":
-                # R = k (constant, shape Nz)
+                # R = k * product(c[reactant_i]^stoich_i for all reactants)
                 rate = np.full(self.Nz, rxn.rate_constant)
+                for reactant_name, stoich in rxn.reactants:
+                    j_reactant = self.species_idx[reactant_name]
+                    c_reactant = u_matrix[j_reactant, :]
+                    rate *= c_reactant ** stoich
 
             elif rxn.rate_type == "monod":
                 # R = k * c[monod_species] / (KM + c[monod_species])
@@ -696,17 +709,40 @@ class RADIModel:
             elif rxn.rate_type == "saturation":
                 # For CaCO3 dissolution (saturation-state dependent)
                 if "Omega_calcite" in carb_info and rxn.name.lower() == "calcite_dissolution":
+                    # Calcite dissolution (Naviaux et al. 2019)
                     Omega = carb_info["Omega_calcite"]
                     if "calcite" in self.species_idx:
                         j_cal = self.species_idx["calcite"]
                         calcite_conc = u_matrix[j_cal, :]
-                        # Vectorized saturation rate
+                        # Vectorized saturation rate (two-regime kinetics)
+                        # Regime 1 (Ω > 0.8275): k_near = 0.00632, n = 0.11
+                        # Regime 2 (Ω ≤ 0.8275): k_far = 20.0, n = 4.7
                         rate = np.where(
                             Omega <= 0.8275,
                             20.0 * calcite_conc * (1.0 - Omega)**4.7,
                             np.where(
                                 Omega <= 1.0,
                                 0.00632 * calcite_conc * (1.0 - Omega)**0.11,
+                                0.0
+                            )
+                        )
+                    else:
+                        rate = np.zeros(self.Nz)
+                elif "Omega_aragonite" in carb_info and rxn.name.lower() == "aragonite_dissolution":
+                    # Aragonite dissolution (Dong et al. 2019)
+                    Omega = carb_info["Omega_aragonite"]
+                    if "aragonite" in self.species_idx:
+                        j_ara = self.species_idx["aragonite"]
+                        aragonite_conc = u_matrix[j_ara, :]
+                        # Vectorized saturation rate (two-regime kinetics)
+                        # Regime 1 (Ω > 0.835): k_near = 0.0157, n = 0.13
+                        # Regime 2 (Ω ≤ 0.835): k_far = 7.76, n = 1.46
+                        rate = np.where(
+                            Omega <= 0.835,
+                            7.76 * aragonite_conc * (1.0 - Omega)**1.46,
+                            np.where(
+                                Omega <= 1.0,
+                                0.0157 * aragonite_conc * (1.0 - Omega)**0.13,
                                 0.0
                             )
                         )
@@ -759,8 +795,11 @@ class RADIModel:
         # Solid burial velocity (shape Nz)
         w_s = w_inf * (1.0 - self.env.phi_inf) / self.phi_s
 
-        # DBL thickness (for top boundary) - use first solute's diffusivity
-        if self.n_solutes > 0:
+        # DBL thickness (for top boundary)
+        # Use override if provided, otherwise compute from current speed
+        if self.env.dbl_thickness_override is not None:
+            dbl = self.env.dbl_thickness_override
+        elif self.n_solutes > 0:
             dbl = dbl_thickness(self.D_eff[0, 0], self.env.U)
         else:
             dbl = 1.0e-3
@@ -990,6 +1029,11 @@ class RADIModel:
                 progress = (t - t_start) / (t_end - t_start)
                 callback(t, progress)
 
+        # Compute output time points if requested for transient mode
+        t_eval = None
+        if self.env.t_eval_points is not None and self.env.mode == "transient":
+            t_eval = np.linspace(self.env.tspan[0], self.env.tspan[1], self.env.t_eval_points)
+
         sol = solve_ivp(
             self.rhs,
             self.env.tspan,
@@ -1001,6 +1045,7 @@ class RADIModel:
             dense_output=True,
             max_step=1000.0,  # max time step [years]
             events=None,
+            t_eval=t_eval,
         )
 
         return self._format_results(sol)
@@ -1022,11 +1067,23 @@ class RADIModel:
         u_final = sol.y[:, -1]
         for i, sp_name in enumerate(self.species_names):
             profile = u_final[i * self.Nz:(i + 1) * self.Nz]
-            results["species_data"][sp_name] = {
+            species_data = {
                 "final_profile": profile,
                 "t_initial": sol.t[0],
                 "t_final": sol.t[-1],
             }
+            
+            # Include all time point profiles if t_eval was used (transient with t_eval_points)
+            if self.env.t_eval_points is not None and self.env.mode == "transient":
+                # sol.y has shape (n_species * Nz, n_time_points)
+                all_profiles = []
+                for t_idx in range(sol.y.shape[1]):
+                    profile_t = sol.y[i * self.Nz:(i + 1) * self.Nz, t_idx]
+                    all_profiles.append(profile_t)
+                species_data["time_series_profiles"] = all_profiles
+                species_data["time_points"] = sol.t
+            
+            results["species_data"][sp_name] = species_data
 
         return results
 
