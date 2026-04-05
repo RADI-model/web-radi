@@ -685,8 +685,11 @@ class RADIModel:
                 rate = np.full(self.Nz, rxn.rate_constant)
                 for reactant_name, stoich in rxn.reactants:
                     j_reactant = self.species_idx[reactant_name]
-                    c_reactant = u_matrix[j_reactant, :]
-                    rate *= c_reactant ** stoich
+                    c_reactant = np.maximum(u_matrix[j_reactant, :], 1e-30)
+                    if stoich == int(stoich):
+                        rate *= c_reactant ** int(stoich)
+                    else:
+                        rate *= c_reactant ** stoich
 
             elif rxn.rate_type == "monod":
                 # R = k * c[monod_species] / (KM + c[monod_species])
@@ -782,6 +785,10 @@ class RADIModel:
             Time derivative
         """
         dudt = np.zeros_like(u)
+
+        # Clamp concentrations to non-negative to avoid NaN from
+        # fractional exponents and singular Jacobians
+        u = np.maximum(u, 0.0)
 
         # Reshape state to (n_species, Nz)
         u_matrix = u.reshape((self.n_species, self.Nz))
@@ -1016,10 +1023,11 @@ class RADIModel:
             - solution: scipy sol object
             - success: bool
         """
-        # Build initial condition
+        # Build initial condition (floor at tiny positive to avoid singular Jacobian)
         u0 = np.zeros(self.n_species * self.Nz)
         for i, sp in enumerate(self.species_list):
-            u0[i * self.Nz:(i + 1) * self.Nz] = sp.initial_value
+            val = max(sp.initial_value, 1.0e-20)
+            u0[i * self.Nz:(i + 1) * self.Nz] = val
 
         # Solve
         t_start, t_end = self.env.tspan
@@ -1040,9 +1048,10 @@ class RADIModel:
             u0,
             method="BDF",
             jac_sparsity=self.jac_sparsity,
-            rtol=1.0e-4,
+            rtol=1.0e-3,
             atol=1.0e-6,
             dense_output=True,
+            first_step=1.0e-6,  # small first step to avoid initial singularity
             max_step=1000.0,  # max time step [years]
             events=None,
             t_eval=t_eval,
