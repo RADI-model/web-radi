@@ -692,16 +692,28 @@ class RADIModel:
                         rate *= c_reactant ** stoich
 
             elif rxn.rate_type == "monod":
-                # R = k * c[monod_species] / (KM + c[monod_species])
+                # R = k * c[substrate] * c[monod_species] / (KM + c[monod_species])
+                # Must multiply by substrate (first reactant) to match RADI.jl
                 j_mon = self.species_idx[rxn.monod_species]
                 c_mon = u_matrix[j_mon, :]
                 rate = rxn.rate_constant * c_mon / (rxn.half_saturation + c_mon)
+                # Multiply by first reactant (substrate) concentration
+                if rxn.reactants:
+                    j_sub = self.species_idx[rxn.reactants[0][0]]
+                    c_sub = np.maximum(u_matrix[j_sub, :], 0.0)
+                    rate *= c_sub
 
             elif rxn.rate_type == "inhibited_monod":
-                # Monod with multiplicative inhibition
+                # R = k * c[substrate] * c[monod] / (KM + c[monod]) * prod(KI/(KI+c[inh]))
+                # Must multiply by substrate (first reactant) to match RADI.jl
                 j_mon = self.species_idx[rxn.monod_species]
                 c_mon = u_matrix[j_mon, :]
                 rate = rxn.rate_constant * c_mon / (rxn.half_saturation + c_mon)
+                # Multiply by first reactant (substrate) concentration
+                if rxn.reactants:
+                    j_sub = self.species_idx[rxn.reactants[0][0]]
+                    c_sub = np.maximum(u_matrix[j_sub, :], 0.0)
+                    rate *= c_sub
 
                 # Apply inhibition factors (vectorized)
                 for inh_name, KI in rxn.inhibitors:
@@ -796,7 +808,7 @@ class RADIModel:
         # Tiny self-decay regularization to prevent singular Jacobian
         # when transport vanishes (e.g. deep cells with zero bioturbation).
         # This ensures every diagonal entry of the Jacobian is nonzero.
-        dudt -= 1.0e-12 * u
+        dudt -= 1.0e-6 * u
 
         # Update burial velocity based on current fluxes
         w_inf = self._compute_burial_velocity(u)
