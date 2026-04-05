@@ -897,10 +897,10 @@ class RADIModel:
             c_w = sp.bc_top_value
             diff_swi = 2.0 * G_series / self.phi[0] * (c_w - c[k]) / dz[k]
 
-            # Interior (between k=0 and k=1)
+            # Diffusive flux from cell 1 into cell 0 (same sign convention as interior formula)
             D_tort_0 = D_eff[0] / tort2[0]
             D_tort_1 = D_eff[1] / tort2[1]
-            diff_int = -D_tort_0 * (c[1] - c[0]) / dz_12_p / dz[0]
+            diff_int = D_tort_0 * (c[1] - c[0]) / dz_12_p / dz[0]
 
             # Advection
             flux_adv_bottom = (u_bur[1] - D_tort_1 * DFF[1]) * c[1]
@@ -920,9 +920,8 @@ class RADIModel:
             D_tort_k = D_eff[k] / tort2[k]
             diff_term = -D_tort_k * (c[k] - c[k - 1]) / dz_12_m / dz[k]
 
-            # Advection
-            flux_adv_top = (u_bur[k] - D_tort_k * DFF[k]) * c[k]
-            adv_term = flux_adv_top / dz[k]
+            # Advection: zero-gradient bottom means outgoing flux ≈ incoming flux → net ≈ 0
+            adv_term = 0.0
 
             # Irrigation
             irr_term = self.alpha[k] * (c_w - c[k])
@@ -990,8 +989,8 @@ class RADIModel:
             else:
                 flux_top = 0.0
 
-            # Bioturbation interior
-            bioturb = -D_bio[k] * (c[k + 1] - c[k]) / dz_12_p / dz[k]
+            # Bioturbative flux from cell 1 into cell 0 (same sign convention as interior)
+            bioturb = D_bio[k] * (c[k + 1] - c[k]) / dz_12_p / dz[k]
 
             # Advection
             Peh_p = w_s[k + 1] * dz_12_p / np.maximum(D_bio[k + 1], 1e-20)
@@ -1008,11 +1007,12 @@ class RADIModel:
             # Bioturbation: zero-gradient from below
             bioturb = -D_bio[k] * (c[k] - c[k - 1]) / dz_12_m / dz[k]
 
-            # Advection
+            # Advection: zero-gradient means outgoing flux = w_s * c[k]
             Peh_m = w_s[k] * dz_12_m / np.maximum(D_bio[k], 1e-20)
             sigma_m = 0.0 if np.abs(Peh_m) < 0.01 else 1.0 / np.tanh(Peh_m) - 1.0 / Peh_m
             flux_adv_top = w_s[k] * (c[k] * (1.0 - sigma_m) + c[k - 1] * sigma_m)
-            adv_term = flux_adv_top / dz[k]
+            flux_adv_bottom = w_s[k] * c[k]  # zero-gradient: c_ghost = c[k]
+            adv_term = -(flux_adv_bottom - flux_adv_top) / dz[k]
 
             dudt[sp_idx * self.Nz + k] = bioturb + adv_term + rxn_rates[k]
 
@@ -1117,6 +1117,10 @@ class RADIModel:
         # Final progress report
         if callback is not None:
             callback(t_end, 1.0)
+
+        # Clamp solution to non-negative (ODE solver can overshoot to small negatives)
+        if sol is not None and sol.y is not None:
+            sol.y = np.maximum(sol.y, 0.0)
 
         return self._format_results(sol)
 
