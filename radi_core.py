@@ -793,6 +793,11 @@ class RADIModel:
         # Reshape state to (n_species, Nz)
         u_matrix = u.reshape((self.n_species, self.Nz))
 
+        # Tiny self-decay regularization to prevent singular Jacobian
+        # when transport vanishes (e.g. deep cells with zero bioturbation).
+        # This ensures every diagonal entry of the Jacobian is nonzero.
+        dudt -= 1.0e-12 * u
+
         # Update burial velocity based on current fluxes
         w_inf = self._compute_burial_velocity(u)
 
@@ -1042,20 +1047,44 @@ class RADIModel:
         if self.env.t_eval_points is not None and self.env.mode == "transient":
             t_eval = np.linspace(self.env.tspan[0], self.env.tspan[1], self.env.t_eval_points)
 
-        sol = solve_ivp(
-            self.rhs,
-            self.env.tspan,
-            u0,
-            method="BDF",
-            jac_sparsity=self.jac_sparsity,
-            rtol=1.0e-3,
-            atol=1.0e-6,
-            dense_output=True,
-            first_step=1.0e-6,  # small first step to avoid initial singularity
-            max_step=1000.0,  # max time step [years]
-            events=None,
-            t_eval=t_eval,
-        )
+        # Try Radau first (most robust for stiff + near-singular),
+        # fall back to BDF, then LSODA if both fail.
+        methods_to_try = [
+            ("Radau", dict(jac_sparsity=self.jac_sparsity)),
+            ("BDF",   dict(jac_sparsity=self.jac_sparsity)),
+            ("Radau", dict()),  # dense Jacobian fallback
+            ("LSODA", dict()),
+        ]
+
+        sol = None
+        for method, extra_opts in methods_to_try:
+            try:
+                sol = solve_ivp(
+                    self.rhs,
+                    self.env.tspan,
+                    u0,
+                    method=method,
+                    rtol=1.0e-3,
+                    atol=1.0e-6,
+                    dense_output=True,
+                    first_step=1.0e-4,
+                    max_step=max(1000.0, (self.env.tspan[1] - self.env.tspan[0]) / 10.0),
+                    t_eval=t_eval,
+                    **extra_opts,
+                )
+                if sol.success:
+                    break
+            except (RuntimeError, ValueError):
+                continue
+
+        if sol is None:
+            # Last resort: explicit method (not ideal for stiff, but won't crash)
+            sol = solve_ivp(
+                self.rhs, self.env.tspan, u0,
+                method="RK45", rtol=1e-3, atol=1e-6,
+                dense_output=True, t_eval=t_eval,
+                max_step=10.0,
+            )
 
         return self._format_results(sol)
 
