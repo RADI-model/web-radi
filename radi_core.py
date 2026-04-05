@@ -884,26 +884,29 @@ class RADIModel:
             k = 0
             dz_12_p = 0.5 * (dz[k] + dz[k + 1])
 
-            # SWI boundary (diffusion + 2-resistor model)
-            if self.n_solutes > 0:
-                # Use this species' own diffusivity
-                D_w = D_eff[0]
-                G_dbl = D_w / dbl
-                G_cell = self.phi[0] * D_eff[0] / (0.5 * dz[0])
-                G_series = 1.0 / (1.0 / G_dbl + 1.0 / G_cell)
-            else:
-                G_series = 1.0
+            # SWI boundary (two-resistor model matching RADI.jl)
+            # Julia: D_tort2 * (2*(c2-c1) + TR*(cw-c1)) / z_res²
+            # where TR = 2*z_res*tort2/dbl
+            D_w = D_eff[0]                      # molecular diffusivity [m²/yr]
+            D_s = D_eff[0] / tort2[0]           # sediment diffusivity [m²/yr]
 
             c_w = sp.bc_top_value
-            diff_swi = 2.0 * G_series / self.phi[0] * (c_w - c[k]) / dz[k]
 
-            # Diffusive flux from cell 1 into cell 0 (same sign convention as interior formula)
-            D_tort_0 = D_eff[0] / tort2[0]
-            D_tort_1 = D_eff[1] / tort2[1]
-            diff_int = D_tort_0 * (c[1] - c[0]) / dz_12_p / dz[0]
+            # SWI flux via two-resistor: G_dbl in series with G_cell
+            G_dbl = D_w / dbl                       # DBL conductance
+            G_cell = D_s / (0.5 * dz[0])            # sediment half-cell conductance
+            G_series = 1.0 / (1.0 / G_dbl + 1.0 / G_cell)
+
+            # Factor 2 accounts for the half-cell distance from SWI to cell center
+            # No 1/phi — consistent with Julia code and interior formula
+            diff_swi = 2.0 * G_series * (c_w - c[k]) / dz[k]
+
+            # Diffusive flux from cell 1 into cell 0 (same sign convention as interior)
+            diff_int = D_s * (c[1] - c[0]) / dz_12_p / dz[0]
 
             # Advection
-            flux_adv_bottom = (u_bur[1] - D_tort_1 * DFF[1]) * c[1]
+            D_s_1 = D_eff[1] / tort2[1]
+            flux_adv_bottom = (u_bur[1] - D_s_1 * DFF[1]) * c[1]
             adv_term = -flux_adv_bottom / dz[0]
 
             # Irrigation
