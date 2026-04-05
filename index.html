@@ -42,7 +42,7 @@
             margin-bottom: 6px;
         }
 
-        .radi-logo { width: 56px; height: 56px; }
+        .radi-logo { width: 52px; height: 65px; }
 
         h1 {
             font-family: 'Patrick Hand', cursive;
@@ -337,31 +337,31 @@
         <header>
             <div class="header-title">
                 <!-- Radish SVG logo -->
-                <svg class="radi-logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-                    <!-- Radish body -->
-                    <ellipse cx="32" cy="36" rx="14" ry="20" fill="#c0392b" />
-                    <ellipse cx="32" cy="36" rx="14" ry="20" fill="url(#radishGrad)" />
-                    <!-- Highlight -->
-                    <ellipse cx="27" cy="30" rx="4" ry="10" fill="rgba(255,255,255,0.25)" transform="rotate(-8 27 30)" />
-                    <!-- Root tip -->
-                    <path d="M32 55 Q33 62 31 63 Q29 62 30 55" fill="#e8a090" />
-                    <!-- Small side roots -->
-                    <path d="M26 48 Q22 51 21 50" stroke="#e8a090" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-                    <path d="M38 46 Q42 49 43 48" stroke="#e8a090" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-                    <!-- Leaves -->
-                    <path d="M32 18 Q26 4 20 2 Q24 6 28 17" fill="#4a7c59" />
-                    <path d="M32 18 Q32 2 34 0 Q36 4 34 17" fill="#5a9a6a" />
-                    <path d="M32 18 Q38 4 44 2 Q40 6 36 17" fill="#4a7c59" />
-                    <!-- Leaf veins -->
-                    <line x1="26" y1="10" x2="30" y2="17" stroke="#3a6a49" stroke-width="0.6" />
-                    <line x1="33" y1="3" x2="33" y2="17" stroke="#4a8a5a" stroke-width="0.6" />
-                    <line x1="38" y1="10" x2="34" y2="17" stroke="#3a6a49" stroke-width="0.6" />
+                <svg class="radi-logo" viewBox="0 0 80 100" xmlns="http://www.w3.org/2000/svg">
                     <defs>
-                        <radialGradient id="radishGrad" cx="40%" cy="35%" r="60%">
-                            <stop offset="0%" stop-color="rgba(255,255,255,0.15)" />
-                            <stop offset="100%" stop-color="rgba(0,0,0,0.1)" />
+                        <radialGradient id="radishBody" cx="38%" cy="40%" r="55%">
+                            <stop offset="0%" stop-color="#e74c3c" />
+                            <stop offset="70%" stop-color="#c0392b" />
+                            <stop offset="100%" stop-color="#962d22" />
                         </radialGradient>
                     </defs>
+                    <!-- Long leaves -->
+                    <path d="M40 42 C36 30 22 10 14 -2 C18 0 26 8 32 18 C30 10 24 -4 20 -12 C24 -6 32 6 35 20 C34 10 32 -6 34 -16 C36 -4 37 10 38 22 C40 12 42 -4 46 -14 C46 -2 43 12 42 22 C46 10 52 -4 58 -10 C54 -2 46 12 42 24 C48 16 58 4 66 -2 C60 6 50 18 44 28" fill="#4a7c59" />
+                    <!-- Leaf veins -->
+                    <path d="M28 12 L36 34" stroke="#3a6a49" stroke-width="0.8" fill="none" />
+                    <path d="M34 -6 L37 34" stroke="#3a6a49" stroke-width="0.8" fill="none" />
+                    <path d="M40 -8 L40 34" stroke="#3a6a49" stroke-width="0.8" fill="none" />
+                    <path d="M50 -2 L42 32" stroke="#3a6a49" stroke-width="0.8" fill="none" />
+                    <path d="M56 4 L43 30" stroke="#3a6a49" stroke-width="0.8" fill="none" />
+                    <!-- Red body — round/bulbous -->
+                    <ellipse cx="40" cy="56" rx="18" ry="20" fill="url(#radishBody)" />
+                    <!-- Highlight sheen -->
+                    <ellipse cx="34" cy="50" rx="5" ry="12" fill="rgba(255,255,255,0.2)" transform="rotate(-10 34 50)" />
+                    <!-- White lower portion — fades to white tip -->
+                    <path d="M24 62 Q26 72 32 80 Q36 86 40 90 Q44 86 48 80 Q54 72 56 62 Q50 70 40 72 Q30 70 24 62 Z" fill="#f5ede0" />
+                    <path d="M32 78 Q36 84 40 88 Q44 84 48 78 Q44 82 40 84 Q36 82 32 78 Z" fill="#fff" />
+                    <!-- Thin root -->
+                    <path d="M40 88 Q41 94 39 98" stroke="#d5c8b4" stroke-width="1.5" fill="none" stroke-linecap="round" />
                 </svg>
                 <h1>RADI</h1>
             </div>
