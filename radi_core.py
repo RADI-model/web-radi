@@ -1049,10 +1049,22 @@ class RADIModel:
         # Solve
         t_start, t_end = self.env.tspan
 
-        def progress_callback(t, y):
-            if callback is not None:
-                progress = (t - t_start) / (t_end - t_start)
-                callback(t, progress)
+        # Wrap rhs to track progress and periodically report it
+        import time as _time
+        _last_report = [_time.monotonic()]
+        _max_t = [t_start]
+
+        def rhs_with_progress(t, u):
+            if t > _max_t[0]:
+                _max_t[0] = t
+            now = _time.monotonic()
+            # Report at most every 0.15 s to avoid slowing the solver
+            if now - _last_report[0] >= 0.15:
+                _last_report[0] = now
+                frac = min((_max_t[0] - t_start) / (t_end - t_start), 1.0)
+                if callback is not None:
+                    callback(_max_t[0], frac)
+            return self.rhs(t, u)
 
         # Compute output time points if requested for transient mode
         t_eval = None
@@ -1069,10 +1081,16 @@ class RADIModel:
         ]
 
         sol = None
+        attempt = 0
+        n_methods = len(methods_to_try) + 1  # +1 for RK45 fallback
         for method, extra_opts in methods_to_try:
+            attempt += 1
+            # Reset progress tracker for each attempt
+            _max_t[0] = t_start
+            _last_report[0] = _time.monotonic()
             try:
                 sol = solve_ivp(
-                    self.rhs,
+                    rhs_with_progress,
                     self.env.tspan,
                     u0,
                     method=method,
@@ -1091,12 +1109,17 @@ class RADIModel:
 
         if sol is None:
             # Last resort: explicit method (not ideal for stiff, but won't crash)
+            _max_t[0] = t_start
             sol = solve_ivp(
-                self.rhs, self.env.tspan, u0,
+                rhs_with_progress, self.env.tspan, u0,
                 method="RK45", rtol=1e-3, atol=1e-6,
                 dense_output=True, t_eval=t_eval,
                 max_step=10.0,
             )
+
+        # Final progress report
+        if callback is not None:
+            callback(t_end, 1.0)
 
         return self._format_results(sol)
 

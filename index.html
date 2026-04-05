@@ -760,6 +760,34 @@
             animation: spin 1s linear infinite;
         }
 
+        .progress-container {
+            width: 320px;
+            text-align: center;
+        }
+
+        .progress-bar-bg {
+            width: 100%;
+            height: 8px;
+            border-radius: 4px;
+            background: rgba(0, 188, 212, 0.15);
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            width: 0%;
+            height: 100%;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #00bcd4, #26c6da, #00e5ff);
+            transition: width 0.2s ease-out;
+        }
+
+        .progress-label {
+            margin-top: 8px;
+            font-size: 0.85rem;
+            color: rgba(224, 231, 255, 0.7);
+            font-variant-numeric: tabular-nums;
+        }
+
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
@@ -1154,8 +1182,14 @@
     </footer>
 
     <div class="loading-overlay" id="loading-overlay">
-        <div class="spinner"></div>
-        <div class="loading-text">Running model...</div>
+        <div class="spinner" id="loading-spinner"></div>
+        <div class="loading-text" id="loading-text">Initializing solver...</div>
+        <div class="progress-container" id="progress-container" style="display:none;">
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="progress-bar-fill"></div>
+            </div>
+            <div class="progress-label" id="progress-label">0 %</div>
+        </div>
     </div>
 
     <script>
@@ -1871,15 +1905,33 @@ ${tEvalStr})\n`;
             // Build full code
             let code = `import json
 import numpy as np
+import asyncio
+import js
 from radi_core import Species, Reaction, Environment, RADIModel
 
 ${speciesCode}
 ${reactionsCode}
 ${envCode}
 
-# Solve
+# Progress callback: calls JS window.updateSolverProgress
+def _progress_cb(t, frac):
+    js.updateSolverProgress(float(t), float(frac))
+
+# Solve with async yield so browser can repaint the progress bar
 model = RADIModel(species_list, reaction_list, env)
-results = model.solve()
+
+# We wrap solve in an async function so we can yield to the event loop
+# before and after solving (the solve itself is synchronous C code,
+# but the callback updates the DOM state for when the browser repaints)
+async def _run():
+    js.updateSolverProgress(0.0, 0.0)
+    await asyncio.sleep(0)  # yield to let browser repaint
+    result = model.solve(callback=_progress_cb)
+    js.updateSolverProgress(float(env.tspan[1]), 1.0)
+    await asyncio.sleep(0)  # yield to let browser repaint
+    return result
+
+results = await _run()
 
 # Format results for JavaScript
 results_dict = {
@@ -1912,26 +1964,55 @@ if hasattr(sol, 't') and len(sol.t) > 1:
             return code;
         }
 
+        // Global progress updater called from Python via Pyodide
+        window.updateSolverProgress = function(t, fraction) {
+            const pct = Math.min(Math.round(fraction * 100), 100);
+            const bar = document.getElementById('progress-bar-fill');
+            const label = document.getElementById('progress-label');
+            const text = document.getElementById('loading-text');
+            if (bar) bar.style.width = pct + '%';
+            if (label) label.textContent = pct + ' %';
+            if (text) text.textContent = 'Solving... (t = ' + t.toFixed(1) + ' yr)';
+        };
+
         async function runModel() {
             const code = buildPythonCode();
 
-            document.getElementById('loading-overlay').classList.add('active');
+            // Reset and show overlay with progress bar
+            const overlay = document.getElementById('loading-overlay');
+            const progressContainer = document.getElementById('progress-container');
+            const bar = document.getElementById('progress-bar-fill');
+            const label = document.getElementById('progress-label');
+            const text = document.getElementById('loading-text');
+            bar.style.width = '0%';
+            label.textContent = '0 %';
+            text.textContent = 'Initializing solver...';
+            progressContainer.style.display = 'none';
+            overlay.classList.add('active');
+
             const errorDiv = document.getElementById('error-message');
             errorDiv.classList.remove('active');
 
             try {
                 let pyodide = window.pyodide;
                 if (!pyodide) {
+                    text.textContent = 'Loading Python runtime...';
                     pyodide = await loadPyodide();
                     window.pyodide = pyodide;
+                    text.textContent = 'Loading NumPy & SciPy...';
                     await pyodide.loadPackage(['numpy', 'scipy']);
 
                     // Load radi_core.py
+                    text.textContent = 'Loading RADI core...';
                     const response = await fetch('./radi_core.py');
                     if (!response.ok) throw new Error('Could not load radi_core.py');
                     const radiCode = await response.text();
                     pyodide.runPython(radiCode);
                 }
+
+                // Show progress bar now that we're about to solve
+                text.textContent = 'Setting up model...';
+                progressContainer.style.display = 'block';
 
                 // Run the model
                 await pyodide.runPythonAsync(code);
@@ -1949,7 +2030,7 @@ if hasattr(sol, 't') and len(sol.t) > 1:
                 errorDiv.textContent = `Error: ${error.message}`;
                 errorDiv.classList.add('active');
             } finally {
-                document.getElementById('loading-overlay').classList.remove('active');
+                overlay.classList.remove('active');
             }
         }
 
