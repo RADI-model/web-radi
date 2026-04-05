@@ -857,7 +857,7 @@ class RADIModel:
             c_w = sp.bc_top_value
             irr_term = self.alpha[1:-1] * (c_w - c_0)
 
-            dudt[sp_idx * self.Nz + 1:-1] = diff_term + adv_term + irr_term + rxn_rates[1:-1]
+            dudt[sp_idx * self.Nz + 1:(sp_idx + 1) * self.Nz - 1] = diff_term + adv_term + irr_term + rxn_rates[1:-1]
 
             # Top cell (k = 0)
             k = 0
@@ -957,7 +957,7 @@ class RADIModel:
             flux_adv_top = w_s[1:-1] * (c_0 * (1.0 - sigma_m) + c_m * sigma_m)
             adv_term = -(flux_adv_bottom - flux_adv_top) / dz[1:-1]
 
-            dudt[sp_idx * self.Nz + 1:-1] = bioturb + adv_term + rxn_rates[1:-1]
+            dudt[sp_idx * self.Nz + 1:(sp_idx + 1) * self.Nz - 1] = bioturb + adv_term + rxn_rates[1:-1]
 
             # Top cell (k = 0): flux boundary
             k = 0
