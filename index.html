@@ -2002,12 +2002,14 @@ if hasattr(sol, 't') and len(sol.t) > 1:
                     text.textContent = 'Loading NumPy & SciPy...';
                     await pyodide.loadPackage(['numpy', 'scipy']);
 
-                    // Load radi_core.py
+                    // Load radi_core.py as a proper module (not __main__)
+                    // so the if __name__ == "__main__" block doesn't execute
                     text.textContent = 'Loading RADI core...';
                     const response = await fetch('./radi_core.py');
                     if (!response.ok) throw new Error('Could not load radi_core.py');
                     const radiCode = await response.text();
-                    pyodide.runPython(radiCode);
+                    pyodide.FS.writeFile('/home/pyodide/radi_core.py', radiCode);
+                    pyodide.runPython('import radi_core');
                 }
 
                 // Show progress bar now that we're about to solve
