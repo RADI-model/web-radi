@@ -1269,6 +1269,14 @@
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
+            // Wire up step pill navigation
+            document.querySelectorAll('.step-pill').forEach(pill => {
+                pill.addEventListener('click', () => {
+                    const step = parseInt(pill.dataset.step);
+                    goToStep(step);
+                });
+            });
+
             initializeSpeciesSelection();
             initializeReactionTemplates();
             initializeEnvironment();
@@ -1662,9 +1670,9 @@
             // Porosity: φ(z) = (φ₀ - φ∞)·exp(-β·z) + φ∞
             const phi = z.map(zi => (phi0 - phiInf) * Math.exp(-beta * zi) + phiInf);
             // Bioturbation: D_bio(z) = D_bio_0 · exp(-(z/λ_b)²)
-            const dbioProfile = z.map(zi => dbio * Math.exp(-(zi / lambdaBio) ** 2));
+            const dbioProfile = z.map(zi => dbio * Math.exp(-Math.pow(zi / lambdaBio, 2)));
             // Irrigation: α(z) = α₀ · exp(-(z/λ_i)²)
-            const alphaProfile = z.map(zi => alpha0 * Math.exp(-(zi / lambdaIrr) ** 2));
+            const alphaProfile = z.map(zi => alpha0 * Math.exp(-Math.pow(zi / lambdaIrr, 2)));
 
             // Burial velocity: w_inf = total_solid_flux / (ρ_sed × φ_s_inf)
             // then w(z) = w_inf × (1 - φ∞) / (1 - φ(z))
