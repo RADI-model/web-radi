@@ -950,7 +950,11 @@
                 <div style="color: #a0aec0; font-size: 13px; margin-bottom: 16px;">Select a template to load common biogeochemical reaction networks. You can then customize individual reactions.</div>
 
                 <div class="template-grid">
-                    <div class="template-card active" data-template="simple">
+                    <div class="template-card active" data-template="quicktest">
+                        <div class="template-name">Quick Test</div>
+                        <div style="color: #a0aec0; font-size: 11px; margin-top: 8px;">2 species, fast solve</div>
+                    </div>
+                    <div class="template-card" data-template="simple">
                         <div class="template-name">Simple O₂-DIC</div>
                         <div style="color: #a0aec0; font-size: 11px; margin-top: 8px;">Aerobic respiration</div>
                     </div>
@@ -983,6 +987,7 @@
                 <div class="env-section">
                     <div class="env-section-title">Preset</div>
                     <select id="env-preset" class="form-select">
+                        <option value="quicktest">Quick Test (low resolution)</option>
                         <option value="deepsea">Deep Sea (W2 - Equatorial Pacific)</option>
                         <option value="margin">Margin (Continental Shelf)</option>
                         <option value="coastal">Coastal</option>
@@ -1217,6 +1222,14 @@
 
         // Environment presets
         const ENV_PRESETS = {
+            quicktest: {
+                name: 'Quick Test (low resolution)',
+                temperature: 10.0, salinity: 35.0, pressure: 100, waterDepth: 100,
+                phi0: 0.80, phiInf: 0.70, beta: 20.0,
+                dbio: 1e-4, lambdaBio: 0.05, alpha0: 100.0, lambdaIrr: 0.03,
+                sedimentDepth: 0.2, nz: 15, topCellSize: 0.001, bottomCellSize: 0.02,
+                timeSpan: 100, mode: 'steady'
+            },
             deepsea: {
                 name: 'Deep Sea (W2 - Equatorial Pacific)',
                 temperature: 1.4, salinity: 34.69, pressure: 4310, waterDepth: 4400,
@@ -1245,6 +1258,23 @@
 
         // Reaction templates
         const REACTION_TEMPLATES = {
+            quicktest: {
+                name: 'Quick Test',
+                species: ['O2', 'POCfast'],
+                reactions: [
+                    {
+                        name: 'O₂ consumption by POC',
+                        rateType: 'monod',
+                        k: 10,
+                        monodSpecies: 'O2',
+                        monodKM: 0.003,
+                        reactants: [{ species: 'POCfast', stoich: 1 }],
+                        products: [
+                            { species: 'O2', stoich: -1.0 }
+                        ]
+                    }
+                ]
+            },
             simple: {
                 name: 'Simple O₂-DIC',
                 species: ['O2', 'DIC', 'PO4', 'NH4', 'POCfast'],
@@ -1315,7 +1345,7 @@
             initializeReactionTemplates();
             initializeEnvironment();
             initializeDBLControls();
-            loadTemplate('simple');
+            loadTemplate('quicktest');
         });
 
         function initializeSpeciesSelection() {
@@ -1439,6 +1469,34 @@
             updateSpeciesTable();
             selectedReactions = JSON.parse(JSON.stringify(template.reactions));
             renderReactions();
+
+            // If the template has a matching environment preset, load it
+            if (templateName === 'quicktest' && ENV_PRESETS.quicktest) {
+                applyEnvPreset('quicktest');
+                document.getElementById('env-preset').value = 'quicktest';
+            }
+        }
+
+        function applyEnvPreset(presetName) {
+            const p = ENV_PRESETS[presetName];
+            if (!p) return;
+            document.getElementById('temperature').value = p.temperature;
+            document.getElementById('salinity').value = p.salinity;
+            document.getElementById('pressure').value = p.pressure;
+            document.getElementById('waterDepth').value = p.waterDepth;
+            document.getElementById('phi0').value = p.phi0;
+            document.getElementById('phiInf').value = p.phiInf;
+            document.getElementById('beta').value = p.beta;
+            document.getElementById('dbio').value = p.dbio;
+            document.getElementById('lambdaBio').value = p.lambdaBio;
+            document.getElementById('alpha0').value = p.alpha0;
+            document.getElementById('lambdaIrr').value = p.lambdaIrr;
+            document.getElementById('sedimentDepth').value = p.sedimentDepth;
+            document.getElementById('nz').value = p.nz;
+            document.getElementById('topCellSize').value = p.topCellSize;
+            document.getElementById('bottomCellSize').value = p.bottomCellSize;
+            document.getElementById('timeSpan').value = p.timeSpan;
+            if (typeof updateProfilesPlot === 'function') updateProfilesPlot();
         }
 
         function renderReactions() {
@@ -1627,48 +1685,15 @@
         }
 
         function initializeEnvironment() {
-            const preset = ENV_PRESETS.deepsea;
-            document.getElementById('temperature').value = preset.temperature;
-            document.getElementById('salinity').value = preset.salinity;
-            document.getElementById('pressure').value = preset.pressure;
-            document.getElementById('waterDepth').value = preset.waterDepth;
-            document.getElementById('phi0').value = preset.phi0;
-            document.getElementById('phiInf').value = preset.phiInf;
-            document.getElementById('beta').value = preset.beta;
-            document.getElementById('dbio').value = preset.dbio;
-            document.getElementById('lambdaBio').value = preset.lambdaBio;
-            document.getElementById('alpha0').value = preset.alpha0;
-            document.getElementById('lambdaIrr').value = preset.lambdaIrr;
-            document.getElementById('sedimentDepth').value = preset.sedimentDepth;
-            document.getElementById('nz').value = preset.nz;
-            document.getElementById('topCellSize').value = preset.topCellSize;
-            document.getElementById('bottomCellSize').value = preset.bottomCellSize;
-            document.getElementById('timeSpan').value = preset.timeSpan;
+            applyEnvPreset('quicktest');
             document.getElementById('numTimePoints').value = 50;
 
             document.querySelectorAll('input[name="mode"]').forEach(radio => {
-                if (radio.value === preset.mode) radio.checked = true;
+                if (radio.value === 'steady') radio.checked = true;
             });
 
             document.getElementById('env-preset').addEventListener('change', (e) => {
-                const p = ENV_PRESETS[e.target.value];
-                document.getElementById('temperature').value = p.temperature;
-                document.getElementById('salinity').value = p.salinity;
-                document.getElementById('pressure').value = p.pressure;
-                document.getElementById('waterDepth').value = p.waterDepth;
-                document.getElementById('phi0').value = p.phi0;
-                document.getElementById('phiInf').value = p.phiInf;
-                document.getElementById('beta').value = p.beta;
-                document.getElementById('dbio').value = p.dbio;
-                document.getElementById('lambdaBio').value = p.lambdaBio;
-                document.getElementById('alpha0').value = p.alpha0;
-                document.getElementById('lambdaIrr').value = p.lambdaIrr;
-                document.getElementById('sedimentDepth').value = p.sedimentDepth;
-                document.getElementById('nz').value = p.nz;
-                document.getElementById('topCellSize').value = p.topCellSize;
-                document.getElementById('bottomCellSize').value = p.bottomCellSize;
-                document.getElementById('timeSpan').value = p.timeSpan;
-                updateProfilesPlot();
+                applyEnvPreset(e.target.value);
             });
 
             document.querySelectorAll('input[name="mode"]').forEach(radio => {
@@ -1722,11 +1747,9 @@
             const wInf = totalSolidFlux > 1e-10 ? totalSolidFlux / (rhoSed * phiSInf) : 1e-6;
             const w = z.map((zi, i) => wInf * (1.0 - phiInf) / (1.0 - phi[i]));
 
-            const plotDiv = document.getElementById('profiles-plot');
-            if (!plotDiv) {
-                const container = document.getElementById('env-plot');
-                if (container) container.style.display = 'block';
-            }
+            // Show the profiles plot container
+            const envPlotContainer = document.getElementById('env-plot');
+            if (envPlotContainer) envPlotContainer.style.display = 'block';
 
             const layout = {
                 title: 'Physical Profiles',
@@ -1905,9 +1928,7 @@ ${tEvalStr})\n`;
             // Build full code
             let code = `import json
 import numpy as np
-import asyncio
 import js
-from radi_core import Species, Reaction, Environment, RADIModel
 
 ${speciesCode}
 ${reactionsCode}
@@ -1915,23 +1936,14 @@ ${envCode}
 
 # Progress callback: calls JS window.updateSolverProgress
 def _progress_cb(t, frac):
-    js.updateSolverProgress(float(t), float(frac))
+    try:
+        js.updateSolverProgress(float(t), float(frac))
+    except Exception:
+        pass
 
-# Solve with async yield so browser can repaint the progress bar
+# Solve
 model = RADIModel(species_list, reaction_list, env)
-
-# We wrap solve in an async function so we can yield to the event loop
-# before and after solving (the solve itself is synchronous C code,
-# but the callback updates the DOM state for when the browser repaints)
-async def _run():
-    js.updateSolverProgress(0.0, 0.0)
-    await asyncio.sleep(0)  # yield to let browser repaint
-    result = model.solve(callback=_progress_cb)
-    js.updateSolverProgress(float(env.tspan[1]), 1.0)
-    await asyncio.sleep(0)  # yield to let browser repaint
-    return result
-
-results = await _run()
+results = model.solve(callback=_progress_cb)
 
 # Format results for JavaScript
 results_dict = {
@@ -2002,14 +2014,14 @@ if hasattr(sol, 't') and len(sol.t) > 1:
                     text.textContent = 'Loading NumPy & SciPy...';
                     await pyodide.loadPackage(['numpy', 'scipy']);
 
-                    // Load radi_core.py as a proper module (not __main__)
-                    // so the if __name__ == "__main__" block doesn't execute
+                    // Load radi_core.py: fetch, strip __main__ block, runPython
                     text.textContent = 'Loading RADI core...';
                     const response = await fetch('./radi_core.py');
                     if (!response.ok) throw new Error('Could not load radi_core.py');
-                    const radiCode = await response.text();
-                    pyodide.FS.writeFile('/home/pyodide/radi_core.py', radiCode);
-                    pyodide.runPython('import radi_core');
+                    let radiCode = await response.text();
+                    // Strip if __name__ == "__main__" block to prevent benchmark execution
+                    radiCode = radiCode.replace(/\nif\s+__name__\s*==\s*['"]__main__['"][\s\S]*$/, '\n');
+                    pyodide.runPython(radiCode);
                 }
 
                 // Show progress bar now that we're about to solve
