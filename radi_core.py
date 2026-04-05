@@ -682,14 +682,11 @@ class RADIModel:
             # Build rate law based on rate_type (vectorized over all depths)
             if rxn.rate_type == "mass_action":
                 # R = k * product(c[reactant_i]^stoich_i for all reactants)
-                rate = np.full(self.Nz, float(rxn.rate_constant))
+                rate = np.full(self.Nz, rxn.rate_constant, dtype=np.float64)
                 for reactant_name, stoich in rxn.reactants:
                     j_reactant = self.species_idx[reactant_name]
                     c_reactant = np.maximum(u_matrix[j_reactant, :], 1e-30)
-                    if stoich == int(stoich):
-                        rate *= c_reactant ** int(stoich)
-                    else:
-                        rate *= c_reactant ** stoich
+                    rate = rate * (c_reactant ** float(stoich))
 
             elif rxn.rate_type == "monod":
                 # R = k * c[substrate] * c[monod_species] / (KM + c[monod_species])
