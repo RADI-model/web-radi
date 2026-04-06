@@ -501,6 +501,10 @@
                     </div>
                 </div>
 
+                <div style="margin-top: 16px;">
+                    <button class="btn btn-secondary" onclick="openAddSpeciesModal()" style="font-size: 14px; padding: 8px 18px;">+ Add Custom Species</button>
+                </div>
+
                 <div style="margin-top: 24px;">
                     <div style="color: #148f77; font-weight: 600; font-size: 13px; margin-bottom: 12px;">Species Parameters</div>
                     <table class="details-table" id="species-table">
@@ -554,6 +558,9 @@
 
                 <div class="card-title" style="margin-top: 20px;">Reactions</div>
                 <div class="reaction-list" id="reactions-list">
+                </div>
+                <div style="margin-top: 14px;">
+                    <button class="btn btn-secondary" onclick="openAddReactionModal()" style="font-size: 14px; padding: 8px 18px;">+ Add Custom Reaction</button>
                 </div>
             </div>
 
@@ -1443,43 +1450,31 @@
             const envPlotContainer = document.getElementById('env-plot');
             if (envPlotContainer) envPlotContainer.style.display = 'block';
 
+            // 4 subplots side-by-side, all sharing the same y-axis (depth)
+            const zCm = z.map(zi => zi * 100);
+
+            const trace1 = { x: phi, y: zCm, name: 'Porosity φ', type: 'scatter', mode: 'lines', line: { color: '#1a5276', width: 2.5 }, xaxis: 'x', yaxis: 'y' };
+            const trace2 = { x: dbioProfile, y: zCm, name: 'D_bio', type: 'scatter', mode: 'lines', line: { color: '#148f77', width: 2.5 }, xaxis: 'x2', yaxis: 'y' };
+            const trace3 = { x: alphaProfile, y: zCm, name: 'Irrigation α', type: 'scatter', mode: 'lines', line: { color: '#2980b9', width: 2.5 }, xaxis: 'x3', yaxis: 'y' };
+            const trace4 = { x: w, y: zCm, name: 'Burial w', type: 'scatter', mode: 'lines', line: { color: '#6d4c2e', width: 2.5 }, xaxis: 'x4', yaxis: 'y' };
+
+            const xBase = { showgrid: true, gridcolor: 'rgba(201,169,110,0.25)', zeroline: false, color: '#1a5276' };
+
             const layout = {
-                title: { text: 'Physical Profiles', font: { family: 'Caveat, cursive', size: 18, color: '#1a5276' } },
+                title: { text: 'Physical Profiles', font: { family: 'Caveat, cursive', size: 20, color: '#1a5276' } },
                 showlegend: false,
                 plot_bgcolor: '#f5f0e2',
                 paper_bgcolor: '#f5f0e2',
                 font: { color: '#2c2018', family: 'Nunito, sans-serif' },
-                grid: { rows: 2, columns: 2, pattern: 'independent' },
-                margin: { l: 50, r: 50, t: 60, b: 50 }
+                margin: { l: 60, r: 20, t: 50, b: 50 },
+                // Shared y-axis
+                yaxis: { title: 'Depth (cm)', autorange: 'reversed', showgrid: true, gridcolor: 'rgba(201,169,110,0.25)', zeroline: false, color: '#1a5276' },
+                // 4 x-axes side by side
+                xaxis:  { ...xBase, title: 'φ', domain: [0, 0.22] },
+                xaxis2: { ...xBase, title: 'D_bio (m²/yr)', domain: [0.28, 0.48], anchor: 'y' },
+                xaxis3: { ...xBase, title: 'α (yr⁻¹)', domain: [0.54, 0.74], anchor: 'y' },
+                xaxis4: { ...xBase, title: 'w (m/yr)', domain: [0.80, 1.0], anchor: 'y' },
             };
-
-            const trace1 = { x: phi, y: z.map(z => z * 100), name: 'φ(z)', type: 'scatter', mode: 'lines', line: { color: '#1a5276', width: 2.5 }, xaxis: 'x1', yaxis: 'y1' };
-            const trace2 = { x: dbioProfile, y: z.map(z => z * 100), name: 'D_bio(z)', type: 'scatter', mode: 'lines', line: { color: '#148f77', width: 2.5 }, xaxis: 'x2', yaxis: 'y2' };
-            const trace3 = { x: alphaProfile, y: z.map(z => z * 100), name: 'α(z)', type: 'scatter', mode: 'lines', line: { color: '#2980b9', width: 2.5 }, xaxis: 'x3', yaxis: 'y3' };
-            const trace4 = { x: w, y: z.map(z => z * 100), name: 'w(z)', type: 'scatter', mode: 'lines', line: { color: '#6d4c2e', width: 2.5 }, xaxis: 'x4', yaxis: 'y4' };
-
-            const xaxis = {
-                showgrid: true,
-                gridcolor: 'rgba(201,169,110,0.25)',
-                zeroline: false,
-                color: '#1a5276'
-            };
-            const yaxis = {
-                showgrid: true,
-                gridcolor: 'rgba(201,169,110,0.25)',
-                zeroline: false,
-                color: '#1a5276',
-                autorange: 'reversed'
-            };
-
-            layout.xaxis = { ...xaxis, title: 'φ' };
-            layout.yaxis = { ...yaxis, title: 'Depth (cm)' };
-            layout.xaxis2 = { ...xaxis, title: 'D_bio (cm²/yr)', anchor: 'y2' };
-            layout.yaxis2 = { ...yaxis, anchor: 'x2' };
-            layout.xaxis3 = { ...xaxis, title: 'α (1/yr)', anchor: 'y3' };
-            layout.yaxis3 = { ...yaxis, anchor: 'x3' };
-            layout.xaxis4 = { ...xaxis, title: 'w (cm/yr)', anchor: 'y4' };
-            layout.yaxis4 = { ...yaxis, anchor: 'x4' };
 
             Plotly.newPlot('profiles-plot', [trace1, trace2, trace3, trace4], layout, { responsive: true });
         }
@@ -1606,6 +1601,10 @@
                 tEvalStr = `    t_eval_points=${numPts},\n`;
             }
 
+            // Skip carbonate solver when no CaCO3 minerals are in the model
+            const hasCaCO3 = selectedSpecies.has('calcite') || selectedSpecies.has('aragonite');
+            const solveCarbStr = hasCaCO3 ? 'True' : 'False';
+
             let envCode = `env = Environment(
     T=${T}, S=${S}, P=${P}, depth=${depth}, U=${currentSpeed},
     phi0=${phi0}, phi_inf=${phiInf}, beta=${beta},
@@ -1616,6 +1615,7 @@
     tspan=(0.0, ${timeSpan}), mode="${mode}",
     RC=1.0, RN=${redN/redC}, RP=${redP/redC},
     dbl_thickness_override=${dblOverrideStr},
+    solve_carbonate=${solveCarbStr},
 ${tEvalStr})\n`;
 
             // Build full code
@@ -1893,6 +1893,246 @@ if hasattr(sol, 't') and len(sol.t) > 1:
                 <td><button class="inhibitor-row-btn" onclick="this.parentElement.parentElement.remove()">Remove</button></td>
             `;
             tbody.appendChild(row);
+        }
+
+        // ── Add Custom Species Modal ──
+        function openAddSpeciesModal() {
+            const modal = document.createElement('div');
+            modal.className = 'modal active';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <div class="modal-title">Add Custom Species</div>
+                        <button class="modal-close" onclick="this.closest('.modal').remove()">×</button>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Species ID (short name, e.g. "MySpecies")</label>
+                        <input type="text" class="form-input" id="custom-sp-id" placeholder="e.g. Fe3">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Long Name</label>
+                        <input type="text" class="form-input" id="custom-sp-longname" placeholder="e.g. Dissolved Iron(III)">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Type</label>
+                        <select class="form-select" id="custom-sp-type">
+                            <option value="solute">Solute</option>
+                            <option value="solid">Solid</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">D₀ — free-solution diffusivity at 0°C (10⁻⁵ cm²/s)</label>
+                        <input type="number" class="form-input" id="custom-sp-d0" value="0.01" step="0.001" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">D_T — temperature coefficient (10⁻⁵ cm²/s/°C)</label>
+                        <input type="number" class="form-input" id="custom-sp-dt" value="0.0005" step="0.0001" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Top Boundary Condition Value</label>
+                        <input type="number" class="form-input" id="custom-sp-bc" value="0" step="0.01">
+                        <span style="color:#7a6b52; font-size:11px;">Solutes: bottom water conc. (mol/m³) | Solids: flux (mol/m²/yr) or conc. (mol/m³)</span>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Initial Value (mol/m³)</label>
+                        <input type="number" class="form-input" id="custom-sp-init" value="0" step="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Color</label>
+                        <input type="color" id="custom-sp-color" value="#e67e22">
+                    </div>
+                    <div class="button-group">
+                        <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="saveCustomSpecies()">Add Species</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+
+        function saveCustomSpecies() {
+            const id = document.getElementById('custom-sp-id').value.trim();
+            if (!id) { alert('Species ID is required.'); return; }
+            if (SPECIES_LIBRARY[id]) { alert('A species with that ID already exists.'); return; }
+
+            const specType = document.getElementById('custom-sp-type').value;
+            const d0 = parseFloat(document.getElementById('custom-sp-d0').value) || 0;
+            const dt = parseFloat(document.getElementById('custom-sp-dt').value) || 0;
+            const bcVal = parseFloat(document.getElementById('custom-sp-bc').value) || 0;
+            const initVal = parseFloat(document.getElementById('custom-sp-init').value) || 0;
+            const color = document.getElementById('custom-sp-color').value;
+            const longName = document.getElementById('custom-sp-longname').value.trim() || id;
+
+            SPECIES_LIBRARY[id] = {
+                longName: longName,
+                type: specType,
+                D0: d0,
+                DT: dt,
+                topBCType: specType === 'solute' ? 'concentration' : 'flux',
+                topBCValue: bcVal,
+                initValue: initVal,
+                color: color,
+                unit: 'mol/m³'
+            };
+
+            // Add to the species grid
+            const card = createSpeciesCard(id, SPECIES_LIBRARY[id]);
+            if (specType === 'solute') {
+                document.getElementById('solutes-grid').appendChild(card);
+            } else {
+                document.getElementById('solids-grid').appendChild(card);
+            }
+
+            // Auto-select it
+            const checkbox = card.querySelector('input');
+            checkbox.checked = true;
+            card.classList.add('checked');
+            selectedSpecies.add(id);
+            updateSpeciesTable();
+            if (typeof updateSimEstimate === 'function') updateSimEstimate();
+
+            document.querySelector('.modal').remove();
+        }
+
+        // ── Add Custom Reaction Modal ──
+        function openAddReactionModal() {
+            const specOptions = Array.from(selectedSpecies).map(s => `<option value="${s}">${s}</option>`).join('');
+            const modal = document.createElement('div');
+            modal.className = 'modal active';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <div class="modal-title">Add Custom Reaction</div>
+                        <button class="modal-close" onclick="this.closest('.modal').remove()">×</button>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Reaction Name</label>
+                        <input type="text" class="form-input" id="new-rxn-name" placeholder="e.g. My custom reaction">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Rate Type</label>
+                        <select class="form-select" id="new-rxn-ratetype" onchange="toggleNewRxnFields()">
+                            <option value="monod">Monod</option>
+                            <option value="inhibited_monod">Inhibited Monod</option>
+                            <option value="mass_action">Mass Action</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Rate Constant k</label>
+                        <input type="number" class="form-input" id="new-rxn-k" value="1.0" step="0.01">
+                    </div>
+                    <div class="form-group" id="new-rxn-monod-group">
+                        <label class="form-label">Monod Species</label>
+                        <select class="form-select" id="new-rxn-monod">${specOptions}</select>
+                        <label class="form-label" style="margin-top: 8px;">Half-saturation K_M</label>
+                        <input type="number" class="form-input" id="new-rxn-km" value="0.01" step="0.001">
+                    </div>
+                    <div class="form-group" id="new-rxn-inhibitors-group" style="display:none;">
+                        <label class="form-label">Inhibitors</label>
+                        <div id="new-rxn-inhibitor-list"></div>
+                        <button class="btn-small btn-edit" onclick="addNewRxnInhibitor()" style="margin-top: 6px;">+ Add Inhibitor</button>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Reactants (species, stoichiometry)</label>
+                        <div id="new-rxn-reactants"></div>
+                        <button class="btn-small btn-edit" onclick="addNewRxnEntry('new-rxn-reactants')" style="margin-top: 6px;">+ Add Reactant</button>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Products (species, stoichiometry)</label>
+                        <div id="new-rxn-products"></div>
+                        <button class="btn-small btn-edit" onclick="addNewRxnEntry('new-rxn-products')" style="margin-top: 6px;">+ Add Product</button>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="saveCustomReaction()">Add Reaction</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            // Add one empty reactant and product row
+            addNewRxnEntry('new-rxn-reactants');
+            addNewRxnEntry('new-rxn-products');
+        }
+
+        function toggleNewRxnFields() {
+            const rt = document.getElementById('new-rxn-ratetype').value;
+            document.getElementById('new-rxn-monod-group').style.display = (rt === 'mass_action') ? 'none' : 'block';
+            document.getElementById('new-rxn-inhibitors-group').style.display = (rt === 'inhibited_monod') ? 'block' : 'none';
+        }
+
+        function addNewRxnEntry(containerId) {
+            const specOptions = Array.from(selectedSpecies).map(s => `<option value="${s}">${s}</option>`).join('');
+            const div = document.getElementById(containerId);
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; gap:8px; align-items:center; margin-bottom:6px;';
+            row.innerHTML = `
+                <select class="form-select" style="flex:2;">${specOptions}</select>
+                <input type="number" class="form-input" value="1.0" step="0.1" style="flex:1;" placeholder="stoich">
+                <button class="inhibitor-row-btn" onclick="this.parentElement.remove()">×</button>
+            `;
+            div.appendChild(row);
+        }
+
+        function addNewRxnInhibitor() {
+            const specOptions = Array.from(selectedSpecies).map(s => `<option value="${s}">${s}</option>`).join('');
+            const div = document.getElementById('new-rxn-inhibitor-list');
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; gap:8px; align-items:center; margin-bottom:6px;';
+            row.innerHTML = `
+                <select class="form-select" style="flex:2;">${specOptions}</select>
+                <input type="number" class="form-input" value="0.01" step="0.001" style="flex:1;" placeholder="K_I">
+                <button class="inhibitor-row-btn" onclick="this.parentElement.remove()">×</button>
+            `;
+            div.appendChild(row);
+        }
+
+        function saveCustomReaction() {
+            const name = document.getElementById('new-rxn-name').value.trim();
+            if (!name) { alert('Reaction name is required.'); return; }
+
+            const rateType = document.getElementById('new-rxn-ratetype').value;
+            const k = parseFloat(document.getElementById('new-rxn-k').value) || 1.0;
+
+            const reactants = [];
+            document.querySelectorAll('#new-rxn-reactants > div').forEach(row => {
+                const sp = row.querySelector('select').value;
+                const st = parseFloat(row.querySelector('input').value) || 1.0;
+                reactants.push({ species: sp, stoich: st });
+            });
+
+            const products = [];
+            document.querySelectorAll('#new-rxn-products > div').forEach(row => {
+                const sp = row.querySelector('select').value;
+                const st = parseFloat(row.querySelector('input').value) || 1.0;
+                products.push({ species: sp, stoich: st });
+            });
+
+            const rxn = {
+                name: name,
+                rateType: rateType,
+                k: k,
+                reactants: reactants,
+                products: products
+            };
+
+            if (rateType !== 'mass_action') {
+                rxn.monodSpecies = document.getElementById('new-rxn-monod').value;
+                rxn.monodKM = parseFloat(document.getElementById('new-rxn-km').value) || 0.01;
+            }
+
+            if (rateType === 'inhibited_monod') {
+                rxn.inhibitors = [];
+                document.querySelectorAll('#new-rxn-inhibitor-list > div').forEach(row => {
+                    const sp = row.querySelector('select').value;
+                    const ki = parseFloat(row.querySelector('input').value) || 0.01;
+                    rxn.inhibitors.push({ species: sp, KI: ki });
+                });
+            }
+
+            selectedReactions.push(rxn);
+            renderReactions();
+            if (typeof updateSimEstimate === 'function') updateSimEstimate();
+            document.querySelector('.modal').remove();
         }
     </script>
 </body>

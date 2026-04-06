@@ -118,6 +118,10 @@ class Environment:
     # Output time step control for transient simulations
     t_eval_points: Optional[int] = None  # number of output time points
 
+    # Carbonate system flag — set to False to skip CO3/Omega computation
+    # (huge speed-up when no CaCO3 species are in the model)
+    solve_carbonate: bool = True
+
 
 # ============================================================================
 # DIFFUSIVITY LIBRARY (Boudreau 1997)
@@ -499,9 +503,9 @@ class RADIModel:
         self._setup_parameters()
         self._build_jacobian_sparsity()
 
-        # Carbonate system (if DIC present)
+        # Carbonate system (only if DIC present AND solve_carbonate is True)
         self.carb_sys = None
-        if "DIC" in self.species:
+        if "DIC" in self.species and self.env.solve_carbonate:
             self.carb_sys = CarbonateSystem(environment.T, environment.S, environment.P)
 
     def _setup_grid(self):
