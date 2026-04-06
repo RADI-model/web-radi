@@ -6,65 +6,108 @@
     <title>RADI — Web Diagenetic Model</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Patrick+Hand&family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        /*
+         * RADI — Field Notebook Theme
+         * ocean · mud · stains · wet · draft · clear · fun
+         *
+         * Palette:
+         *   paper:  #ede6d6 (aged yellow-cream, like wet-dried fieldbook pages)
+         *   ink:    #2c2018 (dark sepia, almost-black mud)
+         *   ocean:  #1a5276 (deep water blue)
+         *   teal:   #148f77 (shallow reef water)
+         *   mud:    #6d4c2e (wet sediment brown)
+         *   stain:  #c9a96e (coffee/tea ring)
+         *   sand:   #d4c5a0 (dry beach)
+         *   accent: #c0392b (radish red, kept for the brand)
+         */
+
         body {
             font-family: 'Nunito', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: #f5f1eb;
+            background: #ede6d6;
+            /* Grid-paper lines + subtle watercolour stain blobs */
             background-image:
-                linear-gradient(rgba(180,160,130,0.12) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(180,160,130,0.12) 1px, transparent 1px);
-            background-size: 28px 28px;
-            color: #3a3226;
+                /* faint blue grid — like graph paper */
+                linear-gradient(rgba(26,82,118,0.07) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(26,82,118,0.07) 1px, transparent 1px),
+                /* coffee ring top-right */
+                radial-gradient(ellipse 120px 110px at 85% 8%, rgba(180,140,80,0.13) 0%, transparent 70%),
+                /* water stain bottom-left */
+                radial-gradient(ellipse 200px 160px at 12% 92%, rgba(20,143,119,0.08) 0%, transparent 70%),
+                /* mud smudge middle */
+                radial-gradient(ellipse 140px 80px at 55% 50%, rgba(109,76,46,0.06) 0%, transparent 70%);
+            background-size: 24px 24px, 24px 24px, 100% 100%, 100% 100%, 100% 100%;
+            color: #2c2018;
             min-height: 100vh;
             padding: 20px;
         }
 
-        .container { max-width: 1200px; margin: 0 auto; }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            position: relative;
+        }
 
-        /* Header */
+        /* ── Header ── */
         header {
             text-align: center;
-            margin-bottom: 36px;
-            padding-bottom: 18px;
-            border-bottom: 2px dashed #c9b99a;
+            margin-bottom: 32px;
+            padding-bottom: 16px;
+            border-bottom: 2.5px dashed #c9a96e;
+            position: relative;
+        }
+        /* Tiny "page stain" accent on the header */
+        header::after {
+            content: '';
+            position: absolute;
+            bottom: -18px; left: 50%;
+            transform: translateX(-50%);
+            width: 60px; height: 10px;
+            background: radial-gradient(ellipse, rgba(180,140,80,0.18), transparent 70%);
+            pointer-events: none;
         }
 
         .header-title {
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 14px;
-            margin-bottom: 6px;
+            gap: 16px;
+            margin-bottom: 4px;
         }
 
-        .radi-logo { width: 72px; height: 90px; }
+        .radi-logo { width: 90px; height: 110px; filter: drop-shadow(1px 2px 2px rgba(0,0,0,0.15)); }
 
         h1 {
-            font-family: 'Patrick Hand', cursive;
-            font-size: 44px;
-            font-weight: 400;
-            color: #c0392b;
-            letter-spacing: 1px;
+            font-family: 'Caveat', 'Patrick Hand', cursive;
+            font-size: 68px;
+            font-weight: 700;
+            color: #1a5276;
+            letter-spacing: 5px;
+            text-transform: uppercase;
+            text-shadow: 2px 2px 0px rgba(26,82,118,0.12);
         }
 
         .header-subtitle {
-            font-family: 'Patrick Hand', cursive;
-            font-size: 17px;
-            color: #7a6e5d;
+            font-family: 'Caveat', cursive;
+            font-size: 19px;
+            color: #6d4c2e;
+            letter-spacing: 1px;
         }
 
         .header-credits {
-            font-size: 12px;
-            color: #a89f91;
+            font-family: 'Nunito', sans-serif;
+            font-size: 11px;
+            color: #a09478;
             margin-top: 4px;
+            font-style: italic;
         }
 
-        /* Step indicator */
+        /* ── Step pills ── */
         .step-indicator {
             display: flex;
             justify-content: center;
@@ -74,57 +117,72 @@
         }
 
         .step-pill {
-            padding: 10px 22px;
+            padding: 10px 24px;
             border-radius: 20px;
-            background: #fff;
-            border: 2px solid #d5cfc5;
-            color: #8a7e6e;
+            background: rgba(255,255,250,0.7);
+            border: 2px solid #c9a96e;
+            color: #6d4c2e;
             cursor: pointer;
-            font-family: 'Patrick Hand', cursive;
-            font-size: 16px;
+            font-family: 'Caveat', cursive;
+            font-size: 18px;
+            font-weight: 600;
             transition: all 0.25s ease;
             box-shadow: 0 1px 3px rgba(0,0,0,0.06);
         }
 
         .step-pill.active {
-            background: #c0392b;
-            color: #fff;
-            border-color: #a93226;
-            box-shadow: 0 2px 8px rgba(192,57,43,0.25);
+            background: #1a5276;
+            color: #ede6d6;
+            border-color: #154360;
+            box-shadow: 0 2px 10px rgba(26,82,118,0.3);
         }
 
         .step-pill:hover:not(.active) {
-            border-color: #c0392b;
-            color: #c0392b;
+            border-color: #148f77;
+            color: #148f77;
             transform: translateY(-1px);
         }
 
-        /* Step content */
+        /* ── Step content ── */
         .step-content { display: none; animation: fadeIn 0.3s ease-in; }
         .step-content.active { display: block; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
-        /* Cards */
+        /* ── Cards — torn notebook page feel ── */
         .card {
-            background: #fffefa;
-            border: 1px solid #ddd6c8;
-            border-radius: 10px;
+            background: rgba(255,255,248,0.85);
+            border: 1px solid #c9a96e;
+            border-left: 4px solid #1a5276;
+            border-radius: 2px 8px 8px 2px;
             padding: 24px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+            box-shadow: 2px 3px 8px rgba(109,76,46,0.08);
+            position: relative;
+        }
+        /* Subtle stain on cards */
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 6px; right: 12px;
+            width: 40px; height: 40px;
+            background: radial-gradient(circle, rgba(201,169,110,0.10) 0%, transparent 70%);
+            border-radius: 50%;
+            pointer-events: none;
         }
 
         .card-title {
-            font-family: 'Patrick Hand', cursive;
-            font-size: 20px;
-            color: #5b4636;
+            font-family: 'Caveat', cursive;
+            font-size: 22px;
+            color: #1a5276;
             margin-bottom: 14px;
             display: flex;
             align-items: center;
             gap: 8px;
+            border-bottom: 1.5px dotted #c9a96e;
+            padding-bottom: 8px;
         }
 
-        /* Species Grid */
+        /* ── Species Grid ── */
         .species-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
@@ -133,9 +191,9 @@
         }
 
         .species-card {
-            background: #fff;
-            border: 2px solid #e4ddd0;
-            border-radius: 8px;
+            background: rgba(255,255,248,0.9);
+            border: 2px solid #d4c5a0;
+            border-radius: 6px;
             padding: 10px 12px;
             cursor: pointer;
             transition: all 0.2s ease;
@@ -144,187 +202,194 @@
             gap: 8px;
             user-select: none;
         }
-        .species-card:hover { border-color: #c0392b; transform: translateY(-1px); }
-        .species-card.checked { background: #fdf2f0; border-color: #c0392b; }
+        .species-card:hover { border-color: #148f77; transform: translateY(-1px); box-shadow: 0 2px 6px rgba(20,143,119,0.15); }
+        .species-card.checked { background: #e8f4f0; border-color: #148f77; }
 
-        .species-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: #c0392b; }
-        .species-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+        .species-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: #148f77; }
+        .species-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; border: 1px solid rgba(0,0,0,0.15); }
         .species-label { flex-grow: 1; }
-        .species-name { font-weight: 700; color: #3a3226; font-size: 13px; }
-        .species-longname { font-size: 11px; color: #8a7e6e; }
+        .species-name { font-weight: 700; color: #2c2018; font-size: 13px; }
+        .species-longname { font-size: 11px; color: #7a6b52; }
 
-        /* Species Table */
+        /* ── Species Table ── */
         .details-table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-        .details-table thead { background: #f7f3ed; }
+        .details-table thead { background: #e6dcc8; }
         .details-table th {
             padding: 10px 8px; text-align: left; font-weight: 700;
-            color: #5b4636; font-size: 12px; border-bottom: 2px solid #ddd6c8;
+            color: #1a5276; font-size: 12px; border-bottom: 2px solid #c9a96e;
+            font-family: 'Caveat', cursive; font-size: 14px;
         }
-        .details-table td { padding: 10px 8px; border-bottom: 1px solid #ece7de; font-size: 13px; }
+        .details-table td { padding: 10px 8px; border-bottom: 1px solid #ddd4be; font-size: 13px; }
         .details-table input, .details-table select {
-            width: 100%; background: #fff; border: 1px solid #ddd6c8;
-            color: #3a3226; padding: 5px 8px; border-radius: 4px; font-size: 12px;
+            width: 100%; background: rgba(255,255,250,0.9); border: 1px solid #c9a96e;
+            color: #2c2018; padding: 5px 8px; border-radius: 4px; font-size: 12px;
         }
-        .details-table input:focus, .details-table select:focus { outline: none; border-color: #c0392b; }
-        .details-table .readonly { background: #f5f1eb; color: #a89f91; cursor: not-allowed; }
+        .details-table input:focus, .details-table select:focus { outline: none; border-color: #148f77; box-shadow: 0 0 0 2px rgba(20,143,119,0.15); }
+        .details-table .readonly { background: #ede6d6; color: #7a6b52; cursor: not-allowed; }
 
-        /* DBL Controls */
+        /* ── DBL Controls ── */
         .dbl-section {
-            background: #f7f3ed; border-left: 3px solid #c0392b;
-            padding: 16px; border-radius: 8px; margin-top: 18px;
+            background: #e8f4f0; border-left: 3px solid #148f77;
+            padding: 16px; border-radius: 6px; margin-top: 18px;
         }
-        .dbl-section label { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; cursor: pointer; color: #5b4636; font-weight: 600; }
-        .dbl-section input[type="radio"] { accent-color: #c0392b; cursor: pointer; }
+        .dbl-section label { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; cursor: pointer; color: #2c2018; font-weight: 600; }
+        .dbl-section input[type="radio"] { accent-color: #148f77; cursor: pointer; }
         .dbl-input-group { display: flex; align-items: center; gap: 10px; margin-top: 6px; margin-left: 24px; }
         .dbl-input-group input {
-            flex: 1; max-width: 140px; background: #fff; border: 1px solid #ddd6c8;
-            color: #3a3226; padding: 7px 10px; border-radius: 6px; font-size: 13px;
+            flex: 1; max-width: 140px; background: rgba(255,255,250,0.9); border: 1px solid #c9a96e;
+            color: #2c2018; padding: 7px 10px; border-radius: 6px; font-size: 13px;
         }
-        .dbl-input-group input:focus { outline: none; border-color: #c0392b; }
-        .dbl-input-group label { margin: 0; color: #8a7e6e; font-size: 13px; font-weight: 400; }
+        .dbl-input-group input:focus { outline: none; border-color: #148f77; }
+        .dbl-input-group label { margin: 0; color: #7a6b52; font-size: 13px; font-weight: 400; }
 
-        /* Reaction Cards */
+        /* ── Reaction Cards ── */
         .reaction-list { display: flex; flex-direction: column; gap: 10px; }
         .reaction-card {
-            background: #fff; border: 1px solid #e4ddd0; border-radius: 8px;
+            background: rgba(255,255,248,0.9); border: 1px solid #d4c5a0; border-radius: 6px;
             padding: 16px; transition: all 0.2s ease;
+            border-left: 3px solid #1a5276;
         }
-        .reaction-card:hover { border-color: #c0392b; }
+        .reaction-card:hover { border-color: #148f77; box-shadow: 0 2px 8px rgba(20,143,119,0.1); }
         .reaction-header { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
-        .reaction-name { color: #3a3226; font-weight: 700; font-size: 14px; }
+        .reaction-name { color: #2c2018; font-weight: 700; font-size: 14px; }
         .reaction-type {
-            background: #fdf2f0; color: #c0392b; padding: 3px 10px;
+            background: #dbeef9; color: #1a5276; padding: 3px 10px;
             border-radius: 10px; font-size: 11px; font-weight: 700; white-space: nowrap;
         }
-        .reaction-params { margin-top: 10px; font-size: 12px; color: #8a7e6e; line-height: 1.7; }
+        .reaction-params { margin-top: 10px; font-size: 12px; color: #7a6b52; line-height: 1.7; }
         .reaction-param { margin: 3px 0; }
-        .reaction-param-label { color: #4a7c59; font-weight: 600; }
+        .reaction-param-label { color: #148f77; font-weight: 600; }
         .reaction-actions { display: flex; gap: 8px; margin-top: 10px; }
 
         .btn-small { padding: 5px 12px; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
-        .btn-edit { background: #e8f5e9; color: #4a7c59; border: 1px solid #a5d6a7; }
-        .btn-edit:hover { background: #c8e6c9; }
+        .btn-edit { background: #e8f4f0; color: #148f77; border: 1px solid #a2d9cd; }
+        .btn-edit:hover { background: #d0ebe3; }
         .btn-delete { background: #fce4e4; color: #c0392b; border: 1px solid #f5b7b1; }
         .btn-delete:hover { background: #f5b7b1; }
 
-        /* Modal */
-        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.35); }
+        /* ── Modal ── */
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(44,32,24,0.4); }
         .modal.active { display: flex; align-items: center; justify-content: center; }
         .modal-content {
-            background: #fffefa; border: 1px solid #ddd6c8; border-radius: 12px;
+            background: #f5f0e2; border: 1px solid #c9a96e; border-radius: 8px;
             padding: 28px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+            box-shadow: 0 8px 30px rgba(44,32,24,0.18);
         }
         .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
-        .modal-title { font-family: 'Patrick Hand', cursive; color: #5b4636; font-size: 22px; }
-        .modal-close { background: none; border: none; color: #a89f91; font-size: 24px; cursor: pointer; }
+        .modal-title { font-family: 'Caveat', cursive; color: #1a5276; font-size: 24px; }
+        .modal-close { background: none; border: none; color: #a09478; font-size: 24px; cursor: pointer; }
         .modal-close:hover { color: #c0392b; }
 
         .form-group { margin-bottom: 14px; }
-        .form-label { display: block; color: #5b4636; font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+        .form-label { display: block; color: #1a5276; font-weight: 700; font-size: 13px; margin-bottom: 6px; }
         .form-input, .form-select {
-            width: 100%; background: #fff; border: 1px solid #ddd6c8;
-            color: #3a3226; padding: 9px 12px; border-radius: 6px; font-size: 13px;
+            width: 100%; background: rgba(255,255,250,0.9); border: 1px solid #c9a96e;
+            color: #2c2018; padding: 9px 12px; border-radius: 6px; font-size: 13px;
         }
-        .form-input:focus, .form-select:focus { outline: none; border-color: #c0392b; }
+        .form-input:focus, .form-select:focus { outline: none; border-color: #148f77; box-shadow: 0 0 0 2px rgba(20,143,119,0.15); }
 
         .inhibitor-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-        .inhibitor-table th { text-align: left; padding: 5px; border-bottom: 1px solid #ddd6c8; color: #4a7c59; font-size: 12px; font-weight: 700; }
-        .inhibitor-table td { padding: 5px; border-bottom: 1px solid #ece7de; }
-        .inhibitor-table input { width: 100%; background: #fff; border: 1px solid #ddd6c8; color: #3a3226; padding: 4px 6px; border-radius: 4px; font-size: 12px; }
+        .inhibitor-table th { text-align: left; padding: 5px; border-bottom: 1px solid #c9a96e; color: #148f77; font-size: 12px; font-weight: 700; }
+        .inhibitor-table td { padding: 5px; border-bottom: 1px solid #ddd4be; }
+        .inhibitor-table input { width: 100%; background: rgba(255,255,250,0.9); border: 1px solid #c9a96e; color: #2c2018; padding: 4px 6px; border-radius: 4px; font-size: 12px; }
         .inhibitor-row-btn { background: #fce4e4; color: #c0392b; border: none; padding: 2px 6px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 
-        /* Buttons */
-        .btn { padding: 11px 22px; border: none; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.2s ease; }
-        .btn-primary { background: #c0392b; color: #fff; }
-        .btn-primary:hover { background: #a93226; box-shadow: 0 3px 10px rgba(192,57,43,0.3); transform: translateY(-1px); }
-        .btn-secondary { background: #f7f3ed; color: #5b4636; border: 1px solid #d5cfc5; }
-        .btn-secondary:hover { background: #ece7de; border-color: #c0392b; color: #c0392b; }
+        /* ── Buttons ── */
+        .btn {
+            padding: 11px 22px; border: none; border-radius: 8px; font-size: 14px;
+            font-weight: 700; cursor: pointer; transition: all 0.2s ease;
+            font-family: 'Caveat', cursive; font-size: 17px; letter-spacing: 0.5px;
+        }
+        .btn-primary { background: #1a5276; color: #ede6d6; }
+        .btn-primary:hover { background: #154360; box-shadow: 0 3px 12px rgba(26,82,118,0.3); transform: translateY(-1px); }
+        .btn-secondary { background: #e6dcc8; color: #2c2018; border: 1px solid #c9a96e; }
+        .btn-secondary:hover { background: #d4c5a0; border-color: #148f77; color: #148f77; }
         .button-group { display: flex; gap: 12px; margin-top: 18px; }
         .button-group .btn { flex: 1; }
 
-        /* Template selector */
+        /* ── Template selector ── */
         .template-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 18px; }
         .template-card {
-            background: #fff; border: 2px solid #e4ddd0; border-radius: 8px;
+            background: rgba(255,255,248,0.8); border: 2px solid #d4c5a0; border-radius: 6px;
             padding: 14px; text-align: center; cursor: pointer; transition: all 0.2s ease;
         }
-        .template-card:hover { border-color: #c0392b; transform: translateY(-1px); }
-        .template-card.active { background: #fdf2f0; border-color: #c0392b; }
-        .template-name { font-family: 'Patrick Hand', cursive; color: #3a3226; font-size: 16px; }
+        .template-card:hover { border-color: #148f77; transform: translateY(-1px); }
+        .template-card.active { background: #dbeef9; border-color: #1a5276; }
+        .template-name { font-family: 'Caveat', cursive; color: #2c2018; font-size: 17px; }
 
-        /* Environment */
+        /* ── Environment ── */
         .env-section {
-            background: #f7f3ed; border-left: 3px solid #4a7c59;
-            padding: 16px; border-radius: 8px; margin-bottom: 14px;
+            background: rgba(232,244,240,0.5); border-left: 3px solid #148f77;
+            padding: 16px; border-radius: 6px; margin-bottom: 14px;
         }
-        .env-section-title { font-family: 'Patrick Hand', cursive; color: #4a7c59; font-size: 17px; margin-bottom: 10px; }
+        .env-section-title { font-family: 'Caveat', cursive; color: #148f77; font-size: 19px; margin-bottom: 10px; font-weight: 600; }
         .env-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 
         .transient-control {
-            background: #fdf2f0; border: 1px solid #f5b7b1; padding: 12px; border-radius: 6px; margin-top: 10px;
+            background: #dbeef9; border: 1px solid #aed6f1; padding: 12px; border-radius: 6px; margin-top: 10px;
         }
         .transient-control label { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; cursor: pointer; }
-        .transient-control input[type="checkbox"] { accent-color: #c0392b; }
+        .transient-control input[type="checkbox"] { accent-color: #1a5276; }
 
-        /* Plots */
+        /* ── Plots ── */
         .plot-container {
-            background: #fff; border: 1px solid #e4ddd0; border-radius: 8px;
+            background: rgba(255,255,248,0.85); border: 1px solid #d4c5a0; border-radius: 6px;
             padding: 16px; margin-bottom: 18px;
         }
-        .plot-title { font-family: 'Patrick Hand', cursive; color: #5b4636; font-size: 16px; margin-bottom: 10px; }
+        .plot-title { font-family: 'Caveat', cursive; color: #1a5276; font-size: 18px; margin-bottom: 10px; }
         .plot { width: 100%; height: 400px; }
         .time-series { width: 100%; height: 400px; }
 
-        /* Results */
+        /* ── Results ── */
         .results-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 18px; }
         .result-stat {
-            background: #fff; border-left: 3px solid #4a7c59; padding: 14px; border-radius: 8px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+            background: rgba(255,255,248,0.9); border-left: 3px solid #148f77; padding: 14px; border-radius: 6px;
+            box-shadow: 1px 2px 6px rgba(109,76,46,0.08);
         }
-        .stat-label { color: #8a7e6e; font-size: 12px; margin-bottom: 3px; }
-        .stat-value { font-family: 'Patrick Hand', cursive; color: #c0392b; font-size: 22px; }
+        .stat-label { color: #7a6b52; font-size: 12px; margin-bottom: 3px; }
+        .stat-value { font-family: 'Caveat', cursive; color: #1a5276; font-size: 24px; }
 
-        /* Loading */
+        /* ── Loading ── */
         .loading-overlay {
             display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(245,241,235,0.92); z-index: 2000;
+            background: rgba(237,230,214,0.94); z-index: 2000;
             justify-content: center; align-items: center; flex-direction: column; gap: 18px;
         }
         .loading-overlay.active { display: flex; }
         .spinner {
-            border: 3px solid #e4ddd0; border-top: 3px solid #c0392b;
-            border-radius: 50%; width: 36px; height: 36px; animation: spin 0.9s linear infinite;
+            border: 3px solid #d4c5a0; border-top: 3px solid #1a5276;
+            border-radius: 50%; width: 38px; height: 38px; animation: spin 0.9s linear infinite;
         }
-        .progress-container { width: 280px; text-align: center; }
-        .progress-bar-bg { width: 100%; height: 6px; border-radius: 3px; background: #e4ddd0; overflow: hidden; }
+        .progress-container { width: 300px; text-align: center; }
+        .progress-bar-bg { width: 100%; height: 7px; border-radius: 4px; background: #d4c5a0; overflow: hidden; }
         .progress-bar-fill {
-            width: 0%; height: 100%; border-radius: 3px;
-            background: linear-gradient(90deg, #c0392b, #e74c3c); transition: width 0.2s ease-out;
+            width: 0%; height: 100%; border-radius: 4px;
+            background: linear-gradient(90deg, #1a5276, #148f77); transition: width 0.2s ease-out;
         }
-        .progress-label { margin-top: 6px; font-size: 0.82rem; color: #8a7e6e; font-variant-numeric: tabular-nums; }
+        .progress-label { margin-top: 6px; font-size: 0.82rem; color: #6d4c2e; font-variant-numeric: tabular-nums; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .loading-text { font-family: 'Patrick Hand', cursive; color: #c0392b; font-size: 18px; }
+        .loading-text { font-family: 'Caveat', cursive; color: #1a5276; font-size: 20px; font-weight: 600; }
 
-        /* Error */
+        /* ── Error ── */
         .error-message {
             background: #fce4e4; border: 1px solid #f5b7b1; color: #922b21;
-            padding: 12px 16px; border-radius: 8px; margin-bottom: 14px; display: none; font-size: 13px;
+            padding: 12px 16px; border-radius: 6px; margin-bottom: 14px; display: none; font-size: 13px;
         }
         .error-message.active { display: block; }
 
-        /* Footer */
+        /* ── Footer ── */
         footer {
             text-align: center; margin-top: 36px; padding-top: 16px;
-            border-top: 2px dashed #c9b99a; color: #a89f91; font-size: 12px;
+            border-top: 2.5px dashed #c9a96e; color: #a09478; font-size: 12px;
+            font-style: italic;
         }
-        .reference { color: #4a7c59; text-decoration: none; }
-        .reference:hover { color: #c0392b; text-decoration: underline; }
+        .reference { color: #1a5276; text-decoration: none; font-style: normal; font-weight: 600; }
+        .reference:hover { color: #148f77; text-decoration: underline; }
 
-        /* Responsive */
+        /* ── Responsive ── */
         @media (max-width: 768px) {
-            h1 { font-size: 30px; }
+            h1 { font-size: 44px; letter-spacing: 3px; }
             .species-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
             .env-grid { grid-template-columns: 1fr; }
             .form-row { grid-template-columns: 1fr; }
@@ -337,41 +402,49 @@
         <header>
             <div class="header-title">
                 <!-- Radish SVG logo -->
-                <svg class="radi-logo" viewBox="0 0 100 120" xmlns="http://www.w3.org/2000/svg">
+                <svg class="radi-logo" viewBox="0 0 120 140" xmlns="http://www.w3.org/2000/svg">
                     <defs>
-                        <radialGradient id="radishBody" cx="40%" cy="38%" r="55%">
-                            <stop offset="0%" stop-color="#ef5350" />
-                            <stop offset="60%" stop-color="#e53935" />
+                        <radialGradient id="radishBody" cx="42%" cy="35%" r="58%">
+                            <stop offset="0%" stop-color="#f44336" />
+                            <stop offset="50%" stop-color="#e53935" />
                             <stop offset="100%" stop-color="#b71c1c" />
                         </radialGradient>
+                        <linearGradient id="leafGrad1" x1="0%" y1="100%" x2="50%" y2="0%">
+                            <stop offset="0%" stop-color="#388e3c" />
+                            <stop offset="100%" stop-color="#66bb6a" />
+                        </linearGradient>
+                        <linearGradient id="leafGrad2" x1="0%" y1="100%" x2="50%" y2="0%">
+                            <stop offset="0%" stop-color="#2e7d32" />
+                            <stop offset="100%" stop-color="#4caf50" />
+                        </linearGradient>
                     </defs>
-                    <!-- Leaves (long, cartoonish, black outline) -->
-                    <!-- Left outer leaf -->
-                    <path d="M44 48 C38 32 20 12 10 -4 C14 2 20 10 28 20 C24 8 16 -8 12 -16 C18 -6 28 12 36 30 Z" fill="#4caf50" stroke="#222" stroke-width="2" stroke-linejoin="round" />
+                    <!-- Big chunky leaves -->
+                    <!-- Left leaf (wide, organic shape) -->
+                    <path d="M52 56 C42 42 22 22 8 2 C6 14 12 30 22 40 C14 28 6 10 2 -2 C8 12 22 34 38 48 Z" fill="url(#leafGrad2)" stroke="#1b5e20" stroke-width="3" stroke-linejoin="round" />
                     <!-- Left-center leaf -->
-                    <path d="M46 46 C42 28 34 6 30 -12 C34 -2 38 14 42 28 C40 16 36 -2 36 -14 C40 0 42 18 44 32 Z" fill="#66bb6a" stroke="#222" stroke-width="2" stroke-linejoin="round" />
-                    <!-- Center leaf -->
-                    <path d="M48 44 C48 26 48 4 50 -18 C52 4 52 26 52 44 Z" fill="#4caf50" stroke="#222" stroke-width="2" stroke-linejoin="round" />
+                    <path d="M54 52 C48 34 38 10 32 -10 C36 6 42 24 46 38 C42 22 36 2 34 -12 C40 6 48 30 52 46 Z" fill="url(#leafGrad1)" stroke="#1b5e20" stroke-width="3" stroke-linejoin="round" />
+                    <!-- Center leaf (tallest, widest) -->
+                    <path d="M55 50 C52 30 52 6 56 -16 C58 -18 62 -16 64 -14 C68 6 68 30 65 50 Z" fill="url(#leafGrad2)" stroke="#1b5e20" stroke-width="3" stroke-linejoin="round" />
                     <!-- Right-center leaf -->
-                    <path d="M54 46 C58 28 62 6 66 -14 C64 -2 60 16 58 28 C60 14 66 -2 70 -12 C66 6 58 28 56 46 Z" fill="#66bb6a" stroke="#222" stroke-width="2" stroke-linejoin="round" />
-                    <!-- Right outer leaf -->
-                    <path d="M56 48 C62 32 78 14 90 -4 C86 2 78 12 72 20 C76 8 84 -6 88 -14 C82 -4 72 14 64 30 Z" fill="#4caf50" stroke="#222" stroke-width="2" stroke-linejoin="round" />
-                    <!-- Leaf veins -->
-                    <line x1="22" y1="6" x2="40" y2="40" stroke="#388e3c" stroke-width="1.2" />
-                    <line x1="34" y1="-6" x2="44" y2="38" stroke="#388e3c" stroke-width="1.2" />
-                    <line x1="50" y1="-10" x2="50" y2="38" stroke="#388e3c" stroke-width="1.2" />
-                    <line x1="66" y1="-6" x2="56" y2="38" stroke="#388e3c" stroke-width="1.2" />
-                    <line x1="78" y1="6" x2="60" y2="40" stroke="#388e3c" stroke-width="1.2" />
-                    <!-- Red body — round/bulbous, black outline -->
-                    <ellipse cx="50" cy="68" rx="24" ry="26" fill="url(#radishBody)" stroke="#222" stroke-width="2.5" />
-                    <!-- Cartoon highlight -->
-                    <ellipse cx="42" cy="58" rx="7" ry="14" fill="rgba(255,255,255,0.35)" transform="rotate(-12 42 58)" />
-                    <ellipse cx="40" cy="52" rx="3" ry="5" fill="rgba(255,255,255,0.5)" transform="rotate(-12 40 52)" />
-                    <!-- White tip area -->
-                    <path d="M30 80 Q34 92 42 100 Q46 104 50 108 Q54 104 58 100 Q66 92 70 80 Q64 90 50 92 Q36 90 30 80 Z" fill="#faf3ea" stroke="#222" stroke-width="2" stroke-linejoin="round" />
-                    <path d="M42 98 Q46 104 50 108 Q54 104 58 98 Q54 102 50 104 Q46 102 42 98 Z" fill="#fff" stroke="#222" stroke-width="1.5" />
-                    <!-- Thin root tail -->
-                    <path d="M50 108 Q52 114 49 119" stroke="#222" stroke-width="2" fill="none" stroke-linecap="round" />
+                    <path d="M66 52 C72 34 80 10 86 -10 C82 6 78 24 74 38 C78 22 84 2 86 -12 C80 6 72 30 68 46 Z" fill="url(#leafGrad1)" stroke="#1b5e20" stroke-width="3" stroke-linejoin="round" />
+                    <!-- Right leaf -->
+                    <path d="M68 56 C78 42 96 22 112 2 C114 14 106 30 98 40 C106 28 114 10 118 -2 C112 12 98 34 82 48 Z" fill="url(#leafGrad2)" stroke="#1b5e20" stroke-width="3" stroke-linejoin="round" />
+                    <!-- Leaf veins (thicker) -->
+                    <line x1="16" y1="12" x2="46" y2="50" stroke="#2e7d32" stroke-width="1.8" opacity="0.7" />
+                    <line x1="34" y1="-4" x2="52" y2="46" stroke="#2e7d32" stroke-width="1.8" opacity="0.7" />
+                    <line x1="60" y1="-10" x2="60" y2="46" stroke="#2e7d32" stroke-width="1.8" opacity="0.7" />
+                    <line x1="86" y1="-4" x2="68" y2="46" stroke="#2e7d32" stroke-width="1.8" opacity="0.7" />
+                    <line x1="104" y1="12" x2="74" y2="50" stroke="#2e7d32" stroke-width="1.8" opacity="0.7" />
+                    <!-- Chunky red body — fat round radish -->
+                    <ellipse cx="60" cy="82" rx="32" ry="34" fill="url(#radishBody)" stroke="#222" stroke-width="3" />
+                    <!-- Cartoon shine highlights -->
+                    <ellipse cx="48" cy="70" rx="9" ry="18" fill="rgba(255,255,255,0.3)" transform="rotate(-15 48 70)" />
+                    <ellipse cx="46" cy="62" rx="4" ry="7" fill="rgba(255,255,255,0.5)" transform="rotate(-15 46 62)" />
+                    <!-- White tip tapering at bottom -->
+                    <path d="M34 98 Q40 112 50 120 Q56 126 60 130 Q64 126 70 120 Q80 112 86 98 Q78 110 60 114 Q42 110 34 98 Z" fill="#faf3ea" stroke="#222" stroke-width="2.5" stroke-linejoin="round" />
+                    <path d="M50 118 Q56 126 60 130 Q64 126 70 118 Q64 124 60 126 Q56 124 50 118 Z" fill="#fff" stroke="#222" stroke-width="2" />
+                    <!-- Little root tail -->
+                    <path d="M60 130 Q62 136 59 140" stroke="#222" stroke-width="2.5" fill="none" stroke-linecap="round" />
                 </svg>
                 <h1>RADI</h1>
             </div>
@@ -392,20 +465,20 @@
         <div class="step-content active" data-step="0">
             <div class="card">
                 <div class="card-title">Select Species</div>
-                <div class="card-title" style="font-size: 13px; color: #8a7e6e; margin-bottom: 16px; font-weight: 400;">Check species to include in your model. Required species are automatically selected when you load a reaction template.</div>
+                <div class="card-title" style="font-size: 13px; color: #7a6b52; margin-bottom: 16px; font-weight: 400;">Check species to include in your model. Required species are automatically selected when you load a reaction template.</div>
 
                 <div>
-                    <div style="color: #4a7c59; font-weight: 600; font-size: 13px; margin: 16px 0 12px 0;">Solutes</div>
+                    <div style="color: #148f77; font-weight: 600; font-size: 13px; margin: 16px 0 12px 0;">Solutes</div>
                     <div class="species-grid" id="solutes-grid"></div>
                 </div>
 
                 <div>
-                    <div style="color: #4a7c59; font-weight: 600; font-size: 13px; margin: 16px 0 12px 0;">Solids</div>
+                    <div style="color: #148f77; font-weight: 600; font-size: 13px; margin: 16px 0 12px 0;">Solids</div>
                     <div class="species-grid" id="solids-grid"></div>
                 </div>
 
                 <div class="dbl-section">
-                    <div style="color: #4a7c59; font-weight: 600; font-size: 13px; margin-bottom: 12px;">Diffusive Boundary Layer (DBL)</div>
+                    <div style="color: #148f77; font-weight: 600; font-size: 13px; margin-bottom: 12px;">Diffusive Boundary Layer (DBL)</div>
                     <label>
                         <input type="radio" name="dbl-mode" value="current" checked>
                         <span>Compute from bottom current speed</span>
@@ -415,7 +488,7 @@
                         <input type="number" id="dbl-current-speed" value="0.02" min="0" step="0.001">
                         <label>m/s</label>
                     </div>
-                    <div style="color: #8a7e6e; font-size: 11px; margin-top: 6px; margin-left: 24px;">DBL thickness will be computed using Boudreau & Jorgensen (2001) formula</div>
+                    <div style="color: #7a6b52; font-size: 11px; margin-top: 6px; margin-left: 24px;">DBL thickness will be computed using Boudreau & Jorgensen (2001) formula</div>
 
                     <label style="margin-top: 12px;">
                         <input type="radio" name="dbl-mode" value="manual">
@@ -429,18 +502,18 @@
                 </div>
 
                 <div style="margin-top: 24px;">
-                    <div style="color: #4a7c59; font-weight: 600; font-size: 13px; margin-bottom: 12px;">Species Parameters</div>
+                    <div style="color: #148f77; font-weight: 600; font-size: 13px; margin-bottom: 12px;">Species Parameters</div>
                     <table class="details-table" id="species-table">
                         <thead>
                             <tr>
                                 <th>Species</th>
                                 <th>Type</th>
-                                <th>BC Type</th>
-                                <th>BC Value</th>
+                                <th>Top Boundary Condition</th>
+                                <th>Top BC Value</th>
                                 <th>Initial Value</th>
                                 <th>Color</th>
-                                <th style="width: 60px;">D₀</th>
-                                <th style="width: 60px;">D_T</th>
+                                <th style="width: 80px;">D₀ (10⁻⁵ cm²/s)</th>
+                                <th style="width: 80px;">D_T (10⁻⁵ cm²/s/°C)</th>
                             </tr>
                         </thead>
                         <tbody id="species-tbody">
@@ -458,24 +531,24 @@
         <div class="step-content" data-step="1">
             <div class="card">
                 <div class="card-title">Reaction Templates</div>
-                <div style="color: #8a7e6e; font-size: 13px; margin-bottom: 16px;">Select a template to load common biogeochemical reaction networks. You can then customize individual reactions.</div>
+                <div style="color: #7a6b52; font-size: 13px; margin-bottom: 16px;">Select a template to load common biogeochemical reaction networks. You can then customize individual reactions.</div>
 
                 <div class="template-grid">
                     <div class="template-card active" data-template="quicktest">
                         <div class="template-name">Quick Test</div>
-                        <div style="color: #8a7e6e; font-size: 11px; margin-top: 8px;">2 species, fast solve</div>
+                        <div style="color: #7a6b52; font-size: 11px; margin-top: 8px;">2 species, fast solve</div>
                     </div>
                     <div class="template-card" data-template="simple">
                         <div class="template-name">Simple O₂-DIC</div>
-                        <div style="color: #8a7e6e; font-size: 11px; margin-top: 8px;">Aerobic respiration</div>
+                        <div style="color: #7a6b52; font-size: 11px; margin-top: 8px;">Aerobic respiration</div>
                     </div>
                     <div class="template-card" data-template="fullchain">
                         <div class="template-name">Full Redox</div>
-                        <div style="color: #8a7e6e; font-size: 11px; margin-top: 8px;">All terminal electron acceptors</div>
+                        <div style="color: #7a6b52; font-size: 11px; margin-top: 8px;">All terminal electron acceptors</div>
                     </div>
                     <div class="template-card" data-template="carbonate">
                         <div class="template-name">Carbonate</div>
-                        <div style="color: #8a7e6e; font-size: 11px; margin-top: 8px;">Focused on CaCO₃</div>
+                        <div style="color: #7a6b52; font-size: 11px; margin-top: 8px;">Focused on CaCO₃</div>
                     </div>
                 </div>
 
@@ -529,8 +602,8 @@
 
                 <div class="env-section">
                     <div class="env-section-title">DBL Specification</div>
-                    <div style="color: #8a7e6e; font-size: 12px; margin-bottom: 12px;">Override the DBL setting from Step 1 (optional)</div>
-                    <label style="color: #4a7c59;">
+                    <div style="color: #7a6b52; font-size: 12px; margin-bottom: 12px;">Override the DBL setting from Step 1 (optional)</div>
+                    <label style="color: #148f77;">
                         <input type="checkbox" id="dbl-override-check">
                         <span style="margin-left: 8px;">Override DBL thickness</span>
                     </label>
@@ -553,7 +626,7 @@
                             <input type="number" id="phiInf" class="form-input" step="0.01" min="0" max="1">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">β (decay constant)</label>
+                            <label class="form-label">β (decay constant, 1/m)</label>
                             <input type="number" id="beta" class="form-input" step="0.1">
                         </div>
                     </div>
@@ -563,11 +636,11 @@
                     <div class="env-section-title">Bioturbation</div>
                     <div class="env-grid">
                         <div class="form-group">
-                            <label class="form-label">D_bio,0 (cm²/yr)</label>
+                            <label class="form-label">D_bio,0 (m²/yr)</label>
                             <input type="number" id="dbio" class="form-input" step="0.00001" min="0">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">λ_bio (1/cm)</label>
+                            <label class="form-label">λ_bio (m)</label>
                             <input type="number" id="lambdaBio" class="form-input" step="0.001" min="0">
                         </div>
                     </div>
@@ -577,11 +650,11 @@
                     <div class="env-section-title">Irrigation</div>
                     <div class="env-grid">
                         <div class="form-group">
-                            <label class="form-label">α₀ (1/yr)</label>
+                            <label class="form-label">α₀ (yr⁻¹)</label>
                             <input type="number" id="alpha0" class="form-input" step="1">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">λ_irr (1/cm)</label>
+                            <label class="form-label">λ_irr (m)</label>
                             <input type="number" id="lambdaIrr" class="form-input" step="0.001">
                         </div>
                     </div>
@@ -595,10 +668,6 @@
                             <input type="number" id="sedimentDepth" class="form-input" step="0.01">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Number of Grid Cells</label>
-                            <input type="number" id="nz" class="form-input" step="1" min="10">
-                        </div>
-                        <div class="form-group">
                             <label class="form-label">Top Cell Size (m)</label>
                             <input type="number" id="topCellSize" class="form-input" step="0.0001" min="0.00001">
                         </div>
@@ -607,15 +676,19 @@
                             <input type="number" id="bottomCellSize" class="form-input" step="0.0001" min="0.0001">
                         </div>
                     </div>
+                    <div style="margin-top: 10px; color: #1a5276; font-size: 13px;">
+                        Computed grid cells: <strong id="nz-display">—</strong>
+                        <span style="color: #7a6b52; font-size: 11px; margin-left: 8px;">(auto-calculated from depth and cell sizes using geometric spacing)</span>
+                    </div>
                 </div>
 
                 <div class="env-section">
                     <div class="env-section-title">Time Integration</div>
-                    <label style="color: #4a7c59;">
+                    <label style="color: #148f77;">
                         <input type="radio" name="mode" value="steady" checked>
                         <span style="margin-left: 8px;">Steady-state (time-independent)</span>
                     </label>
-                    <label style="color: #4a7c59; margin-top: 8px;">
+                    <label style="color: #148f77; margin-top: 8px;">
                         <input type="radio" name="mode" value="transient">
                         <span style="margin-left: 8px;">Transient (time-dependent)</span>
                     </label>
@@ -650,6 +723,10 @@
         <div class="step-content" data-step="3">
             <div class="card">
                 <div class="card-title">Run Model</div>
+                <div id="sim-estimate" style="background: rgba(232,244,240,0.5); border-left: 3px solid #148f77; padding: 12px 16px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; color: #2c2018;">
+                    <strong>Estimated simulation time:</strong> <span id="sim-estimate-value">calculating...</span>
+                    <div style="color: #7a6b52; font-size: 11px; margin-top: 4px;">Estimate based on number of species, grid cells, reactions, and integration time.</div>
+                </div>
                 <button class="btn btn-primary" onclick="runModel()" style="width: 100%; padding: 16px; font-size: 16px;">Run RADI</button>
             </div>
 
@@ -910,17 +987,45 @@
             for (const id of sorted) {
                 const spec = SPECIES_LIBRARY[id];
                 const row = document.createElement('tr');
+
+                // Solutes: only "concentration" (bottom water via DBL transport)
+                // Solids: "concentration" (SWI value) or "flux" (accumulation flux)
+                let bcSelect;
+                if (spec.type === 'solute') {
+                    bcSelect = `<span style="color:#7a6b52; font-size:11px;">Bottom water conc. (via DBL)</span>
+                        <input type="hidden" class="bc-type" data-species="${id}" value="concentration">`;
+                } else {
+                    bcSelect = `<select class="bc-type" data-species="${id}">
+                        <option value="concentration">SWI concentration</option>
+                        <option value="flux" ${spec.topBCType === 'flux' ? 'selected' : ''}>Accumulation flux</option>
+                    </select>`;
+                }
+
+                // Units for BC value
+                let bcUnit = spec.type === 'solute' ? 'mol/m³' : (spec.topBCType === 'flux' ? 'mol/m²/yr' : 'mol/m³');
+
                 row.innerHTML = `
                     <td><strong>${id}</strong></td>
                     <td>${spec.type === 'solute' ? 'Solute' : 'Solid'}</td>
-                    <td><select class="bc-type" data-species="${id}"><option value="concentration" ${spec.type === 'solute' ? 'selected' : ''}>concentration</option><option value="flux" ${spec.type === 'solid' ? 'selected' : ''}>flux</option></select></td>
-                    <td><input type="number" class="bc-value" data-species="${id}" value="${spec.topBCValue}" step="0.01"></td>
-                    <td><input type="number" class="init-value" data-species="${id}" value="${spec.initValue}" step="0.01"></td>
+                    <td>${bcSelect}</td>
+                    <td><input type="number" class="bc-value" data-species="${id}" value="${spec.topBCValue}" step="0.01"> <span style="color:#7a6b52;font-size:10px;" class="bc-unit" data-species="${id}">${bcUnit}</span></td>
+                    <td><input type="number" class="init-value" data-species="${id}" value="${spec.initValue}" step="0.01"> <span style="color:#7a6b52;font-size:10px;">mol/m³</span></td>
                     <td><input type="color" class="color-input" data-species="${id}" value="${spec.color}"></td>
                     <td class="readonly">${spec.D0.toFixed(6)}</td>
                     <td class="readonly">${spec.DT.toFixed(6)}</td>
                 `;
                 tbody.appendChild(row);
+
+                // Update BC unit when solid BC type changes
+                if (spec.type === 'solid') {
+                    const sel = row.querySelector(`.bc-type[data-species="${id}"]`);
+                    const unitSpan = row.querySelector(`.bc-unit[data-species="${id}"]`);
+                    if (sel && unitSpan) {
+                        sel.addEventListener('change', () => {
+                            unitSpan.textContent = sel.value === 'flux' ? 'mol/m²/yr' : 'mol/m³';
+                        });
+                    }
+                }
             }
         }
 
@@ -980,6 +1085,7 @@
             updateSpeciesTable();
             selectedReactions = JSON.parse(JSON.stringify(template.reactions));
             renderReactions();
+            if (typeof updateSimEstimate === 'function') updateSimEstimate();
 
             // If the template has a matching environment preset, load it
             if (templateName === 'quicktest' && ENV_PRESETS.quicktest) {
@@ -1003,10 +1109,10 @@
             document.getElementById('alpha0').value = p.alpha0;
             document.getElementById('lambdaIrr').value = p.lambdaIrr;
             document.getElementById('sedimentDepth').value = p.sedimentDepth;
-            document.getElementById('nz').value = p.nz;
             document.getElementById('topCellSize').value = p.topCellSize;
             document.getElementById('bottomCellSize').value = p.bottomCellSize;
             document.getElementById('timeSpan').value = p.timeSpan;
+            if (typeof updateNzDisplay === 'function') updateNzDisplay();
             if (typeof updateProfilesPlot === 'function') updateProfilesPlot();
         }
 
@@ -1092,9 +1198,9 @@
                             <option value="aragonite" ${reaction.mineral === 'aragonite' ? 'selected' : ''}>Aragonite</option>
                         </select>
                     </div>
-                    <div style="background: rgba(0,188,212,0.1); padding: 12px; border-radius: 6px; margin-top: 12px;">
-                        <div style="color: #4a7c59; font-weight: 600; font-size: 13px; margin-bottom: 8px;">Kinetic Parameters (read-only)</div>
-                        <div style="color: #8a7e6e; font-size: 12px; line-height: 1.6;">
+                    <div style="background: rgba(20,143,119,0.1); padding: 12px; border-radius: 6px; margin-top: 12px;">
+                        <div style="color: #148f77; font-weight: 600; font-size: 13px; margin-bottom: 8px;">Kinetic Parameters (read-only)</div>
+                        <div style="color: #7a6b52; font-size: 12px; line-height: 1.6;">
                             ${reaction.mineral === 'calcite' ? 'Calcite (Naviaux et al., 2019): Ω_threshold=0.8275, n₁=0.11, n₂=4.7, k₁=0.00632, k₂=20.0' : 'Aragonite (Dong et al., 2019): Ω_threshold=0.835, n₁=0.13, n₂=1.46, k₁=0.0157, k₂=7.76'}
                         </div>
                     </div>
@@ -1105,7 +1211,7 @@
                         <label class="form-label">Rate Constant k</label>
                         <input type="number" class="form-input" id="modal-k" value="${reaction.k}" step="0.001">
                     </div>
-                    <div style="color: #4a7c59; font-weight: 600; font-size: 13px; margin: 16px 0 8px 0;">Stoichiometry is fixed. Rate = k × ∏[reactant_i]^stoich_i</div>
+                    <div style="color: #148f77; font-weight: 600; font-size: 13px; margin: 16px 0 8px 0;">Stoichiometry is fixed. Rate = k × ∏[reactant_i]^stoich_i</div>
                 `;
             } else {
                 formContent += `
@@ -1195,6 +1301,76 @@
             renderReactions();
         }
 
+        // Compute number of grid cells from sediment depth, top and bottom cell sizes
+        // Uses geometric spacing: dz grows from dzTop to dzBot
+        function computeNz() {
+            const sedDepth = parseFloat(document.getElementById('sedimentDepth').value) || 0.2;
+            const dzTop = parseFloat(document.getElementById('topCellSize').value) || 0.001;
+            const dzBot = parseFloat(document.getElementById('bottomCellSize').value) || 0.01;
+
+            if (dzTop <= 0 || dzBot <= 0 || sedDepth <= 0) return 10;
+
+            // Binary search for nz such that the sum of geometrically spaced cells ≈ sedDepth
+            let bestNz = 10;
+            for (let nz = 5; nz <= 500; nz++) {
+                const ratio = Math.pow(dzBot / dzTop, 1.0 / (nz - 1));
+                let totalDepth = 0;
+                for (let i = 0; i < nz; i++) {
+                    totalDepth += dzTop * Math.pow(ratio, i);
+                }
+                if (totalDepth >= sedDepth) {
+                    bestNz = nz;
+                    break;
+                }
+                bestNz = nz;
+            }
+            return bestNz;
+        }
+
+        function updateNzDisplay() {
+            const nz = computeNz();
+            const display = document.getElementById('nz-display');
+            if (display) display.textContent = nz;
+            updateSimEstimate();
+        }
+
+        // Estimate simulation time based on model complexity
+        function updateSimEstimate() {
+            const nz = computeNz();
+            const nSpecies = selectedSpecies.size || 2;
+            const nReactions = selectedReactions.length || 1;
+            const timeSpan = parseFloat(document.getElementById('timeSpan').value) || 100;
+
+            // Rough heuristic: base time scales with nSpecies² × nz × log(timeSpan) × nReactions
+            // Calibrated from typical runs: Quick Test ~2s, Full Redox ~60-300s
+            const complexity = nSpecies * nSpecies * nz * Math.log10(Math.max(timeSpan, 10)) * Math.sqrt(nReactions);
+            let estimatedSeconds = complexity * 0.0004; // calibration factor
+
+            // Pyodide overhead: first run ~8s for loading, subsequent ~1s
+            estimatedSeconds += 3;
+
+            const el = document.getElementById('sim-estimate-value');
+            if (!el) return;
+
+            if (estimatedSeconds < 10) {
+                el.textContent = 'A few seconds';
+                el.style.color = '#148f77';
+            } else if (estimatedSeconds < 60) {
+                el.textContent = `~${Math.round(estimatedSeconds)} seconds`;
+                el.style.color = '#148f77';
+            } else if (estimatedSeconds < 300) {
+                el.textContent = `~${Math.round(estimatedSeconds / 60)} minutes`;
+                el.style.color = '#6d4c2e';
+            } else if (estimatedSeconds < 3600) {
+                el.textContent = `~${Math.round(estimatedSeconds / 60)} minutes — consider reducing grid cells or species`;
+                el.style.color = '#c0392b';
+            } else {
+                const hrs = (estimatedSeconds / 3600).toFixed(1);
+                el.textContent = `~${hrs} hours — this will be a long run!`;
+                el.style.color = '#c0392b';
+            }
+        }
+
         function initializeEnvironment() {
             applyEnvPreset('quicktest');
             document.getElementById('numTimePoints').value = 50;
@@ -1215,13 +1391,18 @@
                     } else {
                         transientControl.style.display = 'none';
                     }
+                    updateSimEstimate();
                 });
             });
 
-            document.querySelectorAll('#temperature, #salinity, #pressure, #phi0, #phiInf, #beta, #dbio, #lambdaBio, #alpha0, #lambdaIrr, #sedimentDepth, #nz, #topCellSize, #bottomCellSize').forEach(input => {
-                input.addEventListener('change', updateProfilesPlot);
+            document.querySelectorAll('#temperature, #salinity, #pressure, #phi0, #phiInf, #beta, #dbio, #lambdaBio, #alpha0, #lambdaIrr, #sedimentDepth, #topCellSize, #bottomCellSize, #timeSpan').forEach(input => {
+                input.addEventListener('change', () => {
+                    updateNzDisplay();
+                    updateProfilesPlot();
+                });
             });
 
+            updateNzDisplay();
             updateProfilesPlot();
         }
 
@@ -1234,7 +1415,7 @@
             const alpha0 = parseFloat(document.getElementById('alpha0').value);
             const lambdaIrr = parseFloat(document.getElementById('lambdaIrr').value);
             const sedimentDepth = parseFloat(document.getElementById('sedimentDepth').value);
-            const nz = parseInt(document.getElementById('nz').value);
+            const nz = computeNz();
 
             const z = linspace(0, sedimentDepth, nz);
             // Porosity: φ(z) = (φ₀ - φ∞)·exp(-β·z) + φ∞
@@ -1263,31 +1444,31 @@
             if (envPlotContainer) envPlotContainer.style.display = 'block';
 
             const layout = {
-                title: { text: 'Physical Profiles', font: { family: 'Patrick Hand, cursive', size: 18, color: '#5b4636' } },
+                title: { text: 'Physical Profiles', font: { family: 'Caveat, cursive', size: 18, color: '#1a5276' } },
                 showlegend: false,
-                plot_bgcolor: '#fffefa',
-                paper_bgcolor: '#fffefa',
-                font: { color: '#3a3226', family: 'Nunito, system-ui' },
+                plot_bgcolor: '#f5f0e2',
+                paper_bgcolor: '#f5f0e2',
+                font: { color: '#2c2018', family: 'Nunito, sans-serif' },
                 grid: { rows: 2, columns: 2, pattern: 'independent' },
                 margin: { l: 50, r: 50, t: 60, b: 50 }
             };
 
-            const trace1 = { x: phi, y: z.map(z => z * 100), name: 'φ(z)', type: 'scatter', mode: 'lines', line: { color: '#c0392b', width: 2.5 }, xaxis: 'x1', yaxis: 'y1' };
-            const trace2 = { x: dbioProfile, y: z.map(z => z * 100), name: 'D_bio(z)', type: 'scatter', mode: 'lines', line: { color: '#4a7c59', width: 2.5 }, xaxis: 'x2', yaxis: 'y2' };
+            const trace1 = { x: phi, y: z.map(z => z * 100), name: 'φ(z)', type: 'scatter', mode: 'lines', line: { color: '#1a5276', width: 2.5 }, xaxis: 'x1', yaxis: 'y1' };
+            const trace2 = { x: dbioProfile, y: z.map(z => z * 100), name: 'D_bio(z)', type: 'scatter', mode: 'lines', line: { color: '#148f77', width: 2.5 }, xaxis: 'x2', yaxis: 'y2' };
             const trace3 = { x: alphaProfile, y: z.map(z => z * 100), name: 'α(z)', type: 'scatter', mode: 'lines', line: { color: '#2980b9', width: 2.5 }, xaxis: 'x3', yaxis: 'y3' };
-            const trace4 = { x: w, y: z.map(z => z * 100), name: 'w(z)', type: 'scatter', mode: 'lines', line: { color: '#d4881c', width: 2.5 }, xaxis: 'x4', yaxis: 'y4' };
+            const trace4 = { x: w, y: z.map(z => z * 100), name: 'w(z)', type: 'scatter', mode: 'lines', line: { color: '#6d4c2e', width: 2.5 }, xaxis: 'x4', yaxis: 'y4' };
 
             const xaxis = {
                 showgrid: true,
-                gridcolor: 'rgba(180,160,130,0.2)',
+                gridcolor: 'rgba(201,169,110,0.25)',
                 zeroline: false,
-                color: '#5b4636'
+                color: '#1a5276'
             };
             const yaxis = {
                 showgrid: true,
-                gridcolor: 'rgba(180,160,130,0.2)',
+                gridcolor: 'rgba(201,169,110,0.25)',
                 zeroline: false,
-                color: '#5b4636',
+                color: '#1a5276',
                 autorange: 'reversed'
             };
 
@@ -1317,12 +1498,13 @@
             document.querySelector(`.step-content[data-step="${step}"]`).classList.add('active');
             document.querySelector(`.step-pill[data-step="${step}"]`).classList.add('active');
             window.scrollTo(0, 0);
+            if (step === 3 && typeof updateSimEstimate === 'function') updateSimEstimate();
         }
 
         function buildPythonCode() {
             const mode = document.querySelector('input[name="mode"]:checked').value;
             const timeSpan = parseFloat(document.getElementById('timeSpan').value);
-            const nz = parseInt(document.getElementById('nz').value);
+            const nz = computeNz();
 
             // Determine DBL handling
             let dblOverrideStr = 'None';
@@ -1488,13 +1670,28 @@ if hasattr(sol, 't') and len(sol.t) > 1:
         }
 
         // Global progress updater called from Python via Pyodide
+        let solverStartTime = null;
         window.updateSolverProgress = function(t, fraction) {
             const pct = Math.min(Math.round(fraction * 100), 100);
             const bar = document.getElementById('progress-bar-fill');
             const label = document.getElementById('progress-label');
             const text = document.getElementById('loading-text');
             if (bar) bar.style.width = pct + '%';
-            if (label) label.textContent = pct + ' %';
+
+            // Estimate remaining time
+            let etaStr = '';
+            if (solverStartTime && fraction > 0.01) {
+                const elapsed = (Date.now() - solverStartTime) / 1000;
+                const totalEst = elapsed / fraction;
+                const remaining = totalEst - elapsed;
+                if (remaining > 60) {
+                    etaStr = ` — ~${Math.round(remaining / 60)} min remaining`;
+                } else if (remaining > 5) {
+                    etaStr = ` — ~${Math.round(remaining)}s remaining`;
+                }
+            }
+
+            if (label) label.textContent = pct + ' %' + etaStr;
             if (text) text.textContent = 'Solving... (t = ' + t.toFixed(1) + ' yr)';
         };
 
@@ -1519,14 +1716,14 @@ if hasattr(sol, 't') and len(sol.t) > 1:
             try {
                 let pyodide = window.pyodide;
                 if (!pyodide) {
-                    text.textContent = 'Loading Python runtime...';
+                    text.textContent = 'Loading Python runtime (first run only, ~5s)...';
                     pyodide = await loadPyodide();
                     window.pyodide = pyodide;
-                    text.textContent = 'Loading NumPy & SciPy...';
+                    text.textContent = 'Loading NumPy & SciPy (first run only, ~10s)...';
                     await pyodide.loadPackage(['numpy', 'scipy']);
 
                     // Load radi_core.py: fetch, strip __main__ block, runPython
-                    text.textContent = 'Loading RADI core...';
+                    text.textContent = 'Loading RADI solver engine...';
                     const response = await fetch('./radi_core.py?v=' + Date.now());
                     if (!response.ok) throw new Error('Could not load radi_core.py');
                     let radiCode = await response.text();
@@ -1536,8 +1733,9 @@ if hasattr(sol, 't') and len(sol.t) > 1:
                 }
 
                 // Show progress bar now that we're about to solve
-                text.textContent = 'Setting up model...';
+                text.textContent = 'Building model equations...';
                 progressContainer.style.display = 'block';
+                solverStartTime = Date.now();
 
                 // Run the model
                 await pyodide.runPythonAsync(code);
@@ -1609,12 +1807,12 @@ if hasattr(sol, 't') and len(sol.t) > 1:
                 }));
 
                 const layout = {
-                    title: { text: 'Solute Profiles', font: { family: 'Patrick Hand, cursive', size: 18, color: '#5b4636' } },
-                    plot_bgcolor: '#fffefa',
-                    paper_bgcolor: '#fffefa',
-                    font: { color: '#3a3226', family: 'Nunito, system-ui' },
-                    xaxis: { title: 'Concentration (mol/m³)', gridcolor: 'rgba(180,160,130,0.2)', color: '#5b4636' },
-                    yaxis: { title: 'Depth (cm)', autorange: 'reversed', gridcolor: 'rgba(180,160,130,0.2)', color: '#5b4636' },
+                    title: { text: 'Solute Profiles', font: { family: 'Caveat, cursive', size: 18, color: '#1a5276' } },
+                    plot_bgcolor: '#f5f0e2',
+                    paper_bgcolor: '#f5f0e2',
+                    font: { color: '#2c2018', family: 'Nunito, sans-serif' },
+                    xaxis: { title: 'Concentration (mol/m³)', gridcolor: 'rgba(201,169,110,0.25)', color: '#1a5276' },
+                    yaxis: { title: 'Depth (cm)', autorange: 'reversed', gridcolor: 'rgba(201,169,110,0.25)', color: '#1a5276' },
                     hovermode: 'closest'
                 };
 
@@ -1632,12 +1830,12 @@ if hasattr(sol, 't') and len(sol.t) > 1:
                 }));
 
                 const layout = {
-                    title: { text: 'Solid Profiles', font: { family: 'Patrick Hand, cursive', size: 18, color: '#5b4636' } },
-                    plot_bgcolor: '#fffefa',
-                    paper_bgcolor: '#fffefa',
-                    font: { color: '#3a3226', family: 'Nunito, system-ui' },
-                    xaxis: { title: 'Concentration (mol/m³)', gridcolor: 'rgba(180,160,130,0.2)', color: '#5b4636' },
-                    yaxis: { title: 'Depth (cm)', autorange: 'reversed', gridcolor: 'rgba(180,160,130,0.2)', color: '#5b4636' },
+                    title: { text: 'Solid Profiles', font: { family: 'Caveat, cursive', size: 18, color: '#1a5276' } },
+                    plot_bgcolor: '#f5f0e2',
+                    paper_bgcolor: '#f5f0e2',
+                    font: { color: '#2c2018', family: 'Nunito, sans-serif' },
+                    xaxis: { title: 'Concentration (mol/m³)', gridcolor: 'rgba(201,169,110,0.25)', color: '#1a5276' },
+                    yaxis: { title: 'Depth (cm)', autorange: 'reversed', gridcolor: 'rgba(201,169,110,0.25)', color: '#1a5276' },
                     hovermode: 'closest'
                 };
 
@@ -1674,12 +1872,12 @@ if hasattr(sol, 't') and len(sol.t) > 1:
             }));
 
             const layout = {
-                title: { text: 'Time Series (Surface Concentration)', font: { family: 'Patrick Hand, cursive', size: 18, color: '#5b4636' } },
-                plot_bgcolor: '#fffefa',
-                paper_bgcolor: '#fffefa',
-                font: { color: '#3a3226', family: 'Nunito, system-ui' },
-                xaxis: { title: 'Time (years)', gridcolor: 'rgba(180,160,130,0.2)', color: '#5b4636' },
-                yaxis: { title: 'Concentration (mol/m³)', gridcolor: 'rgba(180,160,130,0.2)', color: '#5b4636' },
+                title: { text: 'Time Series (Surface Concentration)', font: { family: 'Caveat, cursive', size: 18, color: '#1a5276' } },
+                plot_bgcolor: '#f5f0e2',
+                paper_bgcolor: '#f5f0e2',
+                font: { color: '#2c2018', family: 'Nunito, sans-serif' },
+                xaxis: { title: 'Time (years)', gridcolor: 'rgba(201,169,110,0.25)', color: '#1a5276' },
+                yaxis: { title: 'Concentration (mol/m³)', gridcolor: 'rgba(201,169,110,0.25)', color: '#1a5276' },
                 hovermode: 'x unified'
             };
 
