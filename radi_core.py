@@ -1,1402 +1,1014 @@
 """
-RADI (Reactive-Advective-Diffusive-Irrigative) diagenetic sediment model.
+radi_core.py -- the RADI steady-state engine of the RADI web model (Python 3 + numpy + scipy;
+runs unchanged in Pyodide).
 
-A generic, data-driven 1D model of biogeochemical processes in marine sediments.
-Solves coupled PDEs for dissolved (solute) and particulate (solid) species in a
-vertical sediment column.
+RADI = Reactive-Advective-Diffusive-Irrigative early-diagenesis model
+(Sulpis et al., 2022, Geosci. Model Dev. 15, 2105-2131; van der Zant et al., 2026, Geosci. Model Dev. 19,
+1965-1989).
 
-Species and reactions are user-defined; the core handles transport physics,
-carbonate chemistry, and time integration via scipy.integrate.solve_ivp (BDF).
+This file is a line-by-line port of the Julia steady-state engine of RADI.jl (RADI_model.jl with the
+conservative flux-form transport of September 2026), driven the way the RADI.jl station set-up
+(RADI_setup.jl and its station configuration files) drives it, with the smoothed two-regime calcite dissolution law
+(Naviaux et al. 2019 with near-equilibrium exponent 2, a logistic blend of width 0.02 at Omega = 0.8275
+and rate constants x 25). It reproduces the Julia residual to round-off (see tests/test_presets.py).
 
-Author: O. Sulpis (CEREGE/ERC Deep-C)
-License: MIT
+On top of the fixed 18-species RADI core, users may add their own solutes and solids and their own
+reactions (`extensions`, see `_Extensions`).
+
+Units inside the engine: depth m, time yr, solutes mol m-3 of porewater, solids mol m-3 of solid,
+fluxes mol m-2 yr-1. Inputs and outputs use friendly units (umol/kg, cm, mol m-2 yr-1).
 """
-
-from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Callable, Optional
+import math
+import json
+import time
 import numpy as np
-from scipy.integrate import solve_ivp
-from scipy.sparse import lil_matrix, csc_matrix
-from scipy.optimize import brentq
-import warnings
+from scipy.linalg import solve_banded
 
+import carbconst
 
-# ============================================================================
-# DATACLASSES: Species, Reaction, Environment
-# ============================================================================
+VERSION = "2026-10-21"
+SPY = 60 * 60 * 24 * 365.25          # seconds per year
 
-@dataclass
-class Species:
-    """Definition of a chemical species (solute or solid)."""
-    name: str
-    long_name: str
-    species_type: str  # "solute" or "solid"
+# ---------------------------------------------------------------------------------------------------
+# 1. Core species (state order is fixed: it is the Julia engine's)
+# ---------------------------------------------------------------------------------------------------
+CORE = [
+    # id,          label,                                  phase
+    ("O2",        "Dissolved oxygen",                       "solute"),
+    ("DIC",       "Dissolved inorganic carbon",             "solute"),
+    ("NO3",       "Nitrate",                                "solute"),
+    ("SO4",       "Sulfate",                                "solute"),
+    ("PO4",       "Phosphate",                              "solute"),
+    ("NH4",       "Ammonium",                               "solute"),
+    ("H2S",       "Hydrogen sulfide (total)",               "solute"),
+    ("FeII",      "Dissolved iron(II)",                     "solute"),
+    ("MnII",      "Dissolved manganese(II)",                "solute"),
+    ("CH4",       "Methane",                                "solute"),
+    ("TA",        "Total alkalinity",                       "solute"),
+    ("Ca",        "Dissolved calcium",                      "solute"),
+    ("POC_fast",  "Fast-degrading particulate organic C",   "solid"),
+    ("POC_slow",  "Slow-degrading particulate organic C",   "solid"),
+    ("FeOH3",     "Iron(III) hydroxide Fe(OH)3",            "solid"),
+    ("MnO2",      "Manganese oxide MnO2",                   "solid"),
+    ("calcite",   "Calcite CaCO3",                          "solid"),
+    ("aragonite", "Aragonite CaCO3",                        "solid"),
+]
+NCORE = len(CORE)
+IDX = {s[0]: i for i, s in enumerate(CORE)}
 
-    # Diffusion (for solutes; ignored for solids)
-    D0: float  # free-solution diffusivity at 0°C [m²/yr]
-    D_T_coeff: float  # temperature coefficient: D(T) = D0 + D_T_coeff * T [m²/yr/°C]
-
-    # Boundary conditions
-    bc_top_type: str  # "concentration" or "flux"
-    bc_top_value: float  # concentration [mol/m³] or flux [mol/m²/yr]
-    bc_bot_type: str  # "gradient" (zero-gradient)
-    bc_bot_value: float  # typically 0.0
-
-    # Initial condition
-    initial_value: float  # uniform initial concentration [mol/m³]
-
-    # Display
-    unit: str  # e.g. "mol/m³"
-    color: str  # hex color for plotting
-
-    def __post_init__(self):
-        """Validate species definition."""
-        if self.species_type not in ["solute", "solid"]:
-            raise ValueError(f"Invalid species_type: {self.species_type}")
-        if self.bc_top_type not in ["concentration", "flux"]:
-            raise ValueError(f"Invalid bc_top_type: {self.bc_top_type}")
-
-
-@dataclass
-class Reaction:
-    """Definition of a chemical reaction."""
-    name: str
-    rate_type: str  # "monod", "mass_action", "saturation", "inhibited_monod", "custom"
-    rate_constant: float  # k [units depend on rate_type]
-    reactants: List[Tuple[str, float]] = field(default_factory=list)  # [(species, coeff), ...]
-    products: List[Tuple[str, float]] = field(default_factory=list)   # [(species, coeff), ...]
-
-    # Monod kinetics
-    monod_species: Optional[str] = None
-    half_saturation: float = 1.0  # KM [mol/m³]
-
-    # Inhibition
-    inhibitors: List[Tuple[str, float]] = field(default_factory=list)  # [(species, KI), ...]
-
-    # Saturation-state reactions (CaCO3)
-    saturation_params: Dict = field(default_factory=dict)
-
-
-@dataclass
-class Environment:
-    """Physical and chemical environment parameters."""
-    T: float  # temperature [°C]
-    S: float  # salinity [PSU]
-    P: float  # pressure [dbar]
-    depth: float  # water depth [m]
-    U: float  # bottom current speed [m/s]
-
-    # Porosity
-    phi0: float  # surface porosity
-    phi_inf: float  # deep porosity
-    beta: float  # porosity decay constant [1/m]
-
-    # Bioturbation & irrigation
-    D_bio_0: float  # surface bioturbation [m²/yr]
-    lambda_b: float  # bioturbation decay depth [m]
-    lambda_i: float  # irrigation decay depth [m]
-    alpha0: float  # surface irrigation rate [1/yr]
-
-    # Grid
-    depth_sed: float  # sediment column depth [m]
-    Nz: int  # number of depth cells
-    dz_top: float  # top cell thickness [m]
-    dz_bot: float  # bottom cell thickness [m]
-
-    # Time
-    tspan: Tuple[float, float]  # (t_start, t_end) [years]
-    mode: str  # "steady_state" or "transient"
-
-    # Redfield ratios
-    RC: float = 1.0  # C:C
-    RN: float = 0.16  # N:C
-    RP: float = 0.01  # P:C
-
-    # DBL thickness override (if set, use directly instead of computing from current speed)
-    dbl_thickness_override: Optional[float] = None  # [m]
-
-    # Output time step control for transient simulations
-    t_eval_points: Optional[int] = None  # number of output time points
-
-    # Carbonate system flag — set to False to skip CO3/Omega computation
-    # (huge speed-up when no CaCO3 species are in the model)
-    solve_carbonate: bool = True
-
-
-# ============================================================================
-# DIFFUSIVITY LIBRARY (Boudreau 1997)
-# ============================================================================
-
-DIFFUSIVITY_LIBRARY = {
-    "O2": {"D0": 0.031558, "D_T_coeff": 0.001428},
-    "HCO3": {"D0": 0.015179, "D_T_coeff": 0.000795},
-    "CO3": {"D0": 0.012380, "D_T_coeff": 0.000600},
-    "NO3": {"D0": 0.030863, "D_T_coeff": 0.001153},
-    "SO4": {"D0": 0.015779, "D_T_coeff": 0.000712},
-    "PO4": {"D0": 0.009783, "D_T_coeff": 0.000513},
-    "NH4": {"D0": 0.030926, "D_T_coeff": 0.001225},
-    "H2S": {"D0": 0.028938, "D_T_coeff": 0.001314},
-    "Fe2": {"D0": 0.010761, "D_T_coeff": 0.000466},
-    "Mn2": {"D0": 0.009625, "D_T_coeff": 0.000481},
-    "CH4": {"D0": 0.041629, "D_T_coeff": 0.000764},
-    "Ca": {"D0": 0.011771, "D_T_coeff": 0.000529},
-    "DIC": {"D0": 0.015179, "D_T_coeff": 0.000795},  # proxy for HCO3
+# Free-solution diffusion coefficients D = a + b*T (m2/yr, T in degC); Params.jl
+D_COEF = {
+    "O2": (0.031558, 0.001428), "DIC": (0.015179, 0.000795), "NO3": (0.030863, 0.001153),
+    "SO4": (0.015779, 0.000712), "PO4": (0.009783, 0.000513), "NH4": (0.030926, 0.001225),
+    "H2S": (0.028938, 0.001314), "FeII": (0.010761, 0.000466), "MnII": (0.009625, 0.000481),
+    "CH4": (0.041628576888000035, 0.00076369), "TA": (0.015179, 0.000795), "Ca": (0.011771, 0.000529),
 }
 
+# Molar masses (g/mol) used in the solid mass flux that sets the burial velocity (calculate_constants)
+M_MnO2, M_FeOH3, M_CaCO3, M_CLAY = 86.9368, 106.867, 100.0869, 360.31
 
-# ============================================================================
-# UTILITY FUNCTIONS: Grid, Density, Carbonate Chemistry
-# ============================================================================
+# The calcite law (smoothed two-regime Naviaux) and the other fixed reactive constants (React.jl)
+LAW = dict(RATELAW="snaviaux", N1EXP=2.0, SBLEND=0.02, SCROSS=0.8275, KCAL_MULT=25.0, KCAL1_MULT=1.0)
+KM_dO2, KMi_dO2 = 0.003, 0.01
+KM_dtNO3, KMi_dtNO3 = 0.01, 0.005      # RADI_model.jl sets React.KM_dtNO3 = 0.01
+KM_pMnO2, KMi_pMnO2 = 42.4, 42.4
+KM_pFeOH3, KMi_pFeOH3 = 265.0, 265.0
+KM_dtSO4, KMi_dtSO4 = 1.6, 1.6
+k_MnII, k_FeII, k_NH3, k_H2S, k_CH4_O2, k_CH4_SO4 = 1e6, 1e6, 1e4, 3e5, 1e7, 1e4
 
-def generate_grid(depth_sed: float, Nz: int, dz_top: float, dz_bot: float
-                  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Generate geometrically stretched depth grid.
+HMIN, HMAX = 1e-12, 1.0                # clamp of [H+] in mol m-3 (RADI_model.jl)
+RTOL_USER = 1e-6                       # user species: residual relative to their own gross rates
 
-    Parameters
-    ----------
-    depth_sed : float
-        Total sediment column depth [m]
-    Nz : int
-        Number of cells
-    dz_top : float
-        Top cell thickness [m]
-    dz_bot : float
-        Bottom cell thickness [m]
+# The station presets' configuration keys (RADI.jl station configuration files), with defaults
+DEFAULTS = dict(
+    RUN_NAME="custom", WATER_DEPTH=4310.0, TEMPERATURE=1.4, SALINITY=34.69, CURRENT_SPEED=0.02,
+    DBL_THICKNESS=1000.0,
+    O2_BW=159.7, DIC_BW=2324.0, TALK_BW=2426.0, NO3_BW=36.93, PO4_BW=2.39, NH4_BW=1.0, H2S_BW=0.0,
+    SILICATE_BW=120.0, CH4_BW=0.0, FeII_BW=0.0005, MnII_BW=0.0005, CA_BW="from_salinity",
+    POC_RAIN=0.203423, CALCITE_RAIN=0.22, ARAGONITE_RAIN=0.0, CLAY_RAIN=2.0 / 360.31,
+    MnO2_RAIN=0.0005, FeOH3_RAIN=0.0005,
+    POC_FAST_FRACTION=0.7, POC_SLOW_FRACTION=0.27, K_FAST=18.0, K_SLOW=0.006,
+    SURFACE_POROSITY=0.85, DEEP_POROSITY=0.74, POROSITY_DECAY=33.0, PERMEABILITY=6.6e-12,
+    IRRIGATION_DEPTH=0.05, BIOTURBATION_DEPTH=0.08,
+    N_LAYERS=51, SED_DEPTH=0.8, DZ_TOP=1.0e-3, DZ_BOTTOM=5.0e-2,
+)
+RHO_SOLID = 2.65e6                     # g m-3 (rho_p_baseline)
 
-    Returns
-    -------
-    z_centers : ndarray of shape (Nz,)
-        Depth at cell centers [m]
-    z_edges : ndarray of shape (Nz+1,)
-        Depth at cell edges [m]
-    dz : ndarray of shape (Nz,)
-        Cell thicknesses [m]
-    """
-    if Nz < 2:
-        raise ValueError("Nz must be >= 2")
 
-    # Growth rate for geometric progression
+# ---------------------------------------------------------------------------------------------------
+# 2. Site constants (calculate_constants + RADI_setup.jl)
+# ---------------------------------------------------------------------------------------------------
+def grid_geometric(depth, dz_top, dz_bot, Nz, r_max=1.10):
+    """Params.prepdepth_geometric: geometric spacing from dz_top to ~dz_bot, scaled to the depth."""
     r = (dz_bot / dz_top) ** (1.0 / (Nz - 1))
-    r = min(r, 1.10)  # cap to avoid excessive stretching
-
-    # Generate raw spacings
-    dz_raw = dz_top * r ** np.arange(Nz, dtype=float)
-
-    # Scale to exact depth
-    dz = dz_raw * (depth_sed / np.sum(dz_raw))
-
-    # Cell edges (bottom = depth_sed)
-    z_edges = np.concatenate([[0.0], np.cumsum(dz)])
-
-    # Cell centers
-    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
-
-    return z_centers, z_edges, dz
+    r = max(1.0, min(r, r_max))
+    dx_raw = dz_top * r ** np.arange(Nz, dtype=float)
+    s = depth / np.sum(dx_raw)
+    dx = s * dx_raw
+    ze = np.concatenate(([0.0], np.cumsum(dx)))
+    zc = 0.5 * (ze[:-1] + ze[1:])
+    return zc, dx, ze, r
 
 
-def sw_density(T: float, S: float, P: float = 0.0) -> float:
-    """
-    Simplified seawater equation of state.
-
-    Parameters
-    ----------
-    T : float
-        Temperature [°C]
-    S : float
-        Salinity [PSU]
-    P : float
-        Pressure [dbar], default 0
-
-    Returns
-    -------
-    rho : float
-        Density [kg/m³]
-    """
-    # UNESCO (1983) / Millero & Poisson (1981) formulation
-    rho = (999.842594
-           + 6.793952e-2 * T
-           - 9.095290e-3 * T**2
-           + 1.001685e-4 * T**3
-           - 1.120083e-6 * T**4
-           + 6.536332e-9 * T**5)
-
-    rho += S * (0.824493
-                - 4.0899e-3 * T
-                + 7.6438e-5 * T**2
-                - 8.2467e-7 * T**3
-                + 5.3875e-9 * T**4)
-
-    rho += S**1.5 * (-5.72466e-3
-                     + 1.0227e-4 * T
-                     - 1.6546e-6 * T**2)
-
-    rho += 4.8314e-4 * S**2
-
-    # Pressure correction (simplified)
-    if P > 0:
-        rho += P * 4.5e-3
-
-    return rho
+def fv_sigma(Pe):
+    """Fiadeiro-Veronis weighting sigma(Pe) = coth(Pe) - 1/Pe (small-Pe series below 1e-4)."""
+    Pe = np.asarray(Pe, dtype=float)
+    out = Pe / 3.0
+    big = np.abs(Pe) >= 1e-4
+    pb = Pe[big]
+    out[big] = 1.0 / np.tanh(pb) - 1.0 / pb
+    return out
 
 
-def dbl_thickness(D_w: float, U: float) -> float:
-    """
-    Diffusive boundary layer thickness.
-
-    Boudreau & Jorgensen (2001) parameterization:
-    dbl = D_w / (0.00138 * U^0.567)
-
-    Parameters
-    ----------
-    D_w : float
-        Molecular diffusivity at water temp [m²/yr]
-    U : float
-        Bottom current speed [m/s]
-
-    Returns
-    -------
-    dbl : float
-        DBL thickness [m]
-    """
-    if U < 1e-10:
-        return 1.0e-3  # 1 mm default
-
-    # Boudreau & Jorgensen (2001) parameterization
-    # dbl = D_w / (0.00138 * U^0.567)
-    # where D_w is in m²/s and U is in m/s, result in meters
-    D_w_m2s = D_w / 3.1557e7  # convert m²/yr to m²/s
-    dbl = D_w_m2s / (0.00138 * U**0.567)
-    return dbl
+def _dbl_species(D_myr, T, U):
+    """DBL thickness (m) from the near-bed current (Boudreau & Jorgensen 2001), RADI_model.jl DBL()."""
+    u_star = 0.00136 - 2.19598542e-5 * T + 2.35862843e-2 * U
+    nu = 1.747567451381780806e-6 - 3.23886387e-8 * T
+    D = D_myr / (60 * 60 * 24 * 365.25)
+    Sc = nu / D
+    beta = 0.0417 * u_star * Sc ** (-2 / 3)
+    return D / beta
 
 
-class CarbonateSystem:
-    """
-    Simplified but functional carbonate chemistry solver.
+def _ksed(D_myr, T, U, permeability):
+    """Current/permeability-enhanced apparent diffusivity (McGinnis et al. 2014), RADI_model.jl Ksed()."""
+    u_star = 0.00136 - 2.19598542e-5 * T + 2.35862843e-2 * U
+    alpha = 1.0 if permeability >= 1e-12 else 0.0
+    D = D_myr / (60 * 60 * 24 * 365.25)
+    return D * math.exp(alpha * 0.4 * (u_star * 1000)) * 60 * 60 * 24 * 365.25
 
-    Uses Newton-Raphson to solve the alkalinity balance and compute
-    pH, [CO3²⁻], and saturation states for calcite and aragonite.
 
-    Equilibrium constants from Lueker et al. (2000), Millero (1995), Mucci (1983).
-    """
+def _num(cfg, key):
+    v = cfg.get(key, DEFAULTS.get(key))
+    return float(v)
 
-    def __init__(self, T: float, S: float, P: float):
-        """
-        Initialize with T/S/P conditions.
 
-        Parameters
-        ----------
-        T : float
-            Temperature [°C]
-        S : float
-            Salinity [PSU]
-        P : float
-            Pressure [dbar]
-        """
-        self.T = T
-        self.S = S
-        self.P = P
-        self.T_K = T + 273.15
+class Site:
+    """Everything that is constant during a solve: grid, porosity, transport coefficients, chemistry
+    constants, boundary conditions, the species list (core + user) and the linear transport operator."""
 
-        # Compute equilibrium constants (Lueker et al. 2000 formulation)
-        self._compute_constants()
+    def __init__(self, config, extensions=None):
+        cfg = dict(DEFAULTS)
+        cfg.update({k: v for k, v in (config or {}).items() if v is not None})
+        self.cfg = cfg
+        T = _num(cfg, "TEMPERATURE"); S = _num(cfg, "SALINITY"); P = _num(cfg, "WATER_DEPTH")
+        U = _num(cfg, "CURRENT_SPEED")
+        self.T, self.S, self.P, self.U = T, S, P, U
 
-    def _compute_constants(self):
-        """Compute K1, K2, Kb, Kw, Ksp_calcite, Ksp_aragonite."""
-        T = self.T
-        S = self.S
-        P = self.P
-        T_K = self.T_K
+        # ---- bottom water (RADI_setup.jl: umol/kg -> mol/kg) ----
+        bw = {}
+        for sp, key in (("O2", "O2_BW"), ("DIC", "DIC_BW"), ("TA", "TALK_BW"), ("NO3", "NO3_BW"),
+                        ("PO4", "PO4_BW"), ("NH4", "NH4_BW"), ("H2S", "H2S_BW"), ("CH4", "CH4_BW"),
+                        ("FeII", "FeII_BW"), ("MnII", "MnII_BW")):
+            bw[sp] = _num(cfg, key) * 1e-6
+        ca = cfg.get("CA_BW", "from_salinity")
+        bw["Ca"] = (0.02128 / 40.087 * S / 1.80655) if (ca is None or ca == "from_salinity") else float(ca) * 1e-6
+        bw["SO4"] = 29264.2e-6 * S / 35
+        dSi_w = _num(cfg, "SILICATE_BW") * 1e-6
+        self.bw_kg = bw                       # mol/kg
 
-        # K1 (Lueker et al. 2000)
-        lnK1 = (-60.2409 + 93.4517 * (100.0 / T_K) + 23.3585 * np.log(T_K / 100.0)
-                + S * (0.02169 - 0.0002 * (T_K - 298.15)))
-        self.K1 = np.exp(lnK1)
+        # ---- grid and porosity ----
+        Nz = int(round(_num(cfg, "N_LAYERS")))
+        zc, dx, ze, r = grid_geometric(_num(cfg, "SED_DEPTH"), _num(cfg, "DZ_TOP"), _num(cfg, "DZ_BOTTOM"), Nz)
+        phi0, phiInf, beta = _num(cfg, "SURFACE_POROSITY"), _num(cfg, "DEEP_POROSITY"), _num(cfg, "POROSITY_DECAY")
+        phi = (phi0 - phiInf) * np.exp(-beta * zc) + phiInf
+        phiS = 1.0 - phi
+        self.Nz, self.zc, self.dx, self.ze, self.r = Nz, zc, dx, ze, r
+        self.phi, self.phiS, self.phiS_phi = phi, phiS, phiS / phi
+        self.tort2 = 1.0 - 2.0 * np.log(phi)
 
-        # K2 (Lueker et al. 2000)
-        lnK2 = (-60.7883 + 93.4517 * (100.0 / T_K) + 23.3585 * np.log(T_K / 100.0)
-                + S * (0.02169 - 0.0002 * (T_K - 298.15)) - 34.0447)
-        self.K2 = np.exp(lnK2)
+        # ---- seawater ----
+        rho = carbconst.seawater_density(S, T, P)
+        self.rho = rho
 
-        # Kb (Dickson 1990)
-        lnKb = (-8966.90 - 2890.53 * np.sqrt(S) - 77.27 * S
-                + 1.728e-4 * S**1.5 + (148.0 + 137.1925 * np.sqrt(S)
-                + 1.62142 * S) / T_K
-                - (0.47569 + 0.181967 * np.sqrt(S)) * np.log(T_K))
-        self.Kb = np.exp(lnKb)
+        # ---- organic matter and solid fluxes ----
+        RC, RN, RP = 1.0, 16.0 / 106.0, 1.0 / 106.0
+        Mpom = RC * 30.031 + RN * 17.031 + RP * 97.994
+        self.RC, self.RN, self.RP, self.Mpom = RC, RN, RP, Mpom
+        Fpom = (_num(cfg, "POC_RAIN") / RC) * Mpom          # g m-2 yr-1 (RADI_setup.jl Fpom_setup)
+        Fpom_mol = Fpom / Mpom
+        Fpoc = Fpom_mol * RC
+        ffast, fslow = _num(cfg, "POC_FAST_FRACTION"), _num(cfg, "POC_SLOW_FRACTION")
+        self.Fpoc = Fpoc
+        self.Ffoc, self.Fsoc = Fpoc * ffast, Fpoc * fslow
+        self.Froc = Fpoc * (1.0 - ffast - fslow)
+        F_cal, F_ara = _num(cfg, "CALCITE_RAIN"), _num(cfg, "ARAGONITE_RAIN")
+        F_MnO2, F_FeOH3, F_clay = _num(cfg, "MnO2_RAIN"), _num(cfg, "FeOH3_RAIN"), _num(cfg, "CLAY_RAIN")
+        self.rain = {"POC_fast": self.Ffoc, "POC_slow": self.Fsoc, "FeOH3": F_FeOH3, "MnO2": F_MnO2,
+                     "calcite": F_cal, "aragonite": F_ara}
+        Fp = Fpom + F_MnO2 * M_MnO2 + F_FeOH3 * M_FeOH3 + (F_cal + F_ara) * M_CaCO3 + F_clay * M_CLAY
 
-        # Kw (Millero 1995)
-        lnKw = 148.96502 - 13847.26 / T_K - 23.6521 * np.log(T_K)
-        self.Kw = np.exp(lnKw)
+        # ---- user species (they add their solid mass flux to the burial velocity) ----
+        self.ext = _Extensions(extensions, self)
+        Fp = Fp + self.ext.extra_solid_mass_flux()
+        self.Fp = Fp
 
-        # Ksp calcite (Mucci 1983 + pressure correction)
-        lnKsp_cal_0 = (-171.9065 - 0.077993 * T_K + 2839.319 / T_K
-                       + 71.595 * np.log10(T_K)
-                       + S * (-0.77712 + 0.0028426 * T_K + 178.34 / T_K))
-        self.Ksp_calcite_0 = 10.0 ** lnKsp_cal_0
+        # ---- bioturbation, burial, irrigation ----
+        O2w_m3 = bw["O2"] * rho
+        lam_b = _num(cfg, "BIOTURBATION_DEPTH")
+        D_bio_0 = 0.0232e-4 * (1e2 * Fpoc) ** 0.85
+        self.D_bio = D_bio_0 * np.exp(-(zc / lam_b) ** 2) * O2w_m3 / (O2w_m3 + 0.02)
+        x0 = Fp / (RHO_SOLID * phiS[0])
+        xinf = x0 * phiS[0] / phiS[-1]
+        self.u_bur = xinf * phi[-1] / phi
+        self.w = xinf * phiS[-1] / phiS
+        alpha_0 = (11.0 * (math.atan((1e2 * Fpoc * 5.0 - 400.0) / 400.0) / math.pi + 0.5) - 0.9 +
+                   20.0 * (O2w_m3 / (O2w_m3 + 0.01)) * math.exp(-O2w_m3 / 0.01) * 1e2 * Fpoc / (1e2 * Fpoc + 30.0))
+        self.alpha = alpha_0 * np.exp(-(zc / _num(cfg, "IRRIGATION_DEPTH")) ** 2)
+        self.alpha_0 = alpha_0
 
-        # Pressure correction (Millero 1995)
-        dV_cal = -48.76 - 0.5304 * T  # molar volume change [cm³/mol]
-        dK_cal = -11.76e-4 * T - 0.3692  # compressibility change [cm³·bar/mol]
-        Pbar = P * 10.0  # convert dbar to bar
-        ln_ratio_cal = -(dV_cal / 83.14472 / T_K) * Pbar + (0.5 * dK_cal / 83.14472 / T_K) * Pbar**2
-        self.Ksp_calcite = self.Ksp_calcite_0 * np.exp(ln_ratio_cal)
+        # ---- degradation constants ----
+        self.kfast = np.full(Nz, _num(cfg, "K_FAST"))
+        self.kslow = np.full(Nz, _num(cfg, "K_SLOW"))
 
-        # Ksp aragonite (similar, slightly different parameters)
-        lnKsp_ara_0 = (-171.945 - 0.077993 * T_K + 2903.293 / T_K
-                       + 71.595 * np.log10(T_K)
-                       + S * (-0.068393 + 0.0017276 * T_K + 88.135 / T_K))
-        self.Ksp_aragonite_0 = 10.0 ** lnKsp_ara_0
-
-        dV_ara = -46.18 - 0.528 * T
-        dK_ara = -11.24e-4 * T - 0.3962
-        ln_ratio_ara = -(dV_ara / 83.14472 / T_K) * Pbar + (0.5 * dK_ara / 83.14472 / T_K) * Pbar**2
-        self.Ksp_aragonite = self.Ksp_aragonite_0 * np.exp(ln_ratio_ara)
-
-    def solve_alkalinity(self, DIC, ALK, Ca=10.28e-3):
-        """
-        Solve the alkalinity balance for pH, [CO3²⁻], Omega_calcite, Omega_aragonite.
-
-        Accepts both scalar and array inputs.
-
-        Parameters
-        ----------
-        DIC : float or ndarray
-            Dissolved Inorganic Carbon [mol/kg-SW]. Can be scalar or shape (Nz,)
-        ALK : float or ndarray
-            Alkalinity [mol/kg-SW]. Can be scalar or shape (Nz,)
-        Ca : float or ndarray
-            Calcium concentration [mol/kg-SW], default 10.28e-3 (seawater)
-            Can be scalar or shape (Nz,)
-
-        Returns
-        -------
-        pH : float or ndarray
-            pH (total scale)
-        CO3 : float or ndarray
-            [CO3²⁻] [mol/kg-SW]
-        Omega_calcite : float or ndarray
-            Saturation state for calcite
-        Omega_aragonite : float or ndarray
-            Saturation state for aragonite
-        """
-        # Convert to numpy arrays, preserving scalar case
-        DIC = np.asarray(DIC)
-        ALK = np.asarray(ALK)
-        Ca = np.asarray(Ca)
-        is_scalar = DIC.ndim == 0
-
-        DIC = np.atleast_1d(DIC)
-        ALK = np.atleast_1d(ALK)
-        Ca = np.atleast_1d(Ca)
-
-        K1, K2 = self.K1, self.K2
-        Kb, Kw = self.Kb, self.Kw
-
-        # Initial guess: solve simplified system
-        H = np.maximum(K1 * DIC / ALK, 1.0e-10)
-
-        # Newton-Raphson iteration (vectorized)
-        for iteration in range(50):
-            # Carbonate speciation
-            HCO3 = DIC * K1 / (H + K1)
-            CO3_calc = DIC * K1 * K2 / (H * H + H * K1 + K1 * K2)
-
-            # Borate
-            B_total = 416.0e-6  # mol/kg-SW (constant for ocean)
-            BOH4 = B_total * Kb / (H + Kb)
-
-            # OH-
-            OH = Kw / H
-
-            # ALK equation
-            f = HCO3 + 2.0 * CO3_calc + BOH4 + OH - H - ALK
-
-            # Derivative w.r.t. H
-            d_HCO3 = -DIC * K1 / (H + K1)**2
-            d_CO3 = -DIC * K1 * K2 * (2.0 * H + K1) / (H * H + H * K1 + K1 * K2)**2
-            d_BOH4 = -B_total * Kb / (H + Kb)**2
-            d_OH = -Kw / H**2
-            df = d_HCO3 + 2.0 * d_CO3 + d_BOH4 + d_OH - 1.0
-
-            # Newton step (avoid division by zero)
-            df_safe = np.where(np.abs(df) < 1e-14, 1.0, df)
-            H_new = H - f / df_safe
-            H_new = np.maximum(H_new, 1.0e-12)
-
-            # Check convergence
-            converged = np.abs(H_new - H) / np.maximum(H, 1e-14) < 1.0e-8
-            if np.all(converged):
-                H = H_new
-                break
-            H = H_new
-
-        pH = -np.log10(H)
-
-        # Final speciation
-        HCO3 = DIC * K1 / (H + K1)
-        CO3 = DIC * K1 * K2 / (H * H + H * K1 + K1 * K2)
-
-        # Saturation states
-        Omega_calcite = (Ca * CO3) / self.Ksp_calcite
-        Omega_aragonite = (Ca * CO3) / self.Ksp_aragonite
-
-        # Return scalars if input was scalar
-        if is_scalar:
-            return float(pH[0]), float(CO3[0]), float(Omega_calcite[0]), float(Omega_aragonite[0])
+        # ---- carbonate chemistry (CO2SYS, free scale) -> mol m-3 units ----
+        c = carbconst.carbonate_constants(S, T, P)
+        TK = T + 273.15
+        K1 = c["K1"] * rho
+        K2 = c["K2"] * rho
+        K1 = K1 * 10.0 ** (-4876.77 / TK + 111.2321 - 16.65226 * math.log(TK))   # Lueker -> Sulpis et al. 2020
+        K2 = K2 * 10.0 ** (-3754.45 / TK + 85.3926 - 12.77784 * math.log(TK))
+        self.K = dict(K1=K1, K2=K2, Kw=c["KW"] * rho ** 2, KB=c["KB"] * rho, KF=c["KF"] * rho,
+                      KSO4=c["KSO4"] * rho, KP1=c["KP1"] * rho, KP2=c["KP2"] * rho, KP3=c["KP3"] * rho,
+                      KSi=c["KSi"] * rho, KNH3=c["KNH4"] * rho, KH2S=c["KH2S"] * rho,
+                      TB=c["TB"] * (1e-6 * rho), TF=c["TF"] * (1e-6 * rho),
+                      KCa=c["KCa"] * rho ** 2, KAr=c["KAr"] * rho ** 2)
+        self.dSi_inp = dSi_w * rho
+        # bottom-water pH and saturation (initial [H+] guess and display)
+        try:
+            pH0, omCa, omAr = carbconst.ph_and_omega(1e6 * bw["TA"], 1e6 * bw["DIC"], S, T, P,
+                                                     1e6 * dSi_w, 1e6 * bw["PO4"], 1e6 * bw["NH4"], 1e6 * bw["H2S"])
+        except Exception:          # the rare CO2SYS non-convergence corner: fall back to our own solve
+            pH0 = None; omCa = omAr = float("nan")
+        self.omegaCa_bw, self.omegaAr_bw = omCa, omAr
+        if pH0 is None:
+            H = _solve_H(np.array([bw["TA"] * rho]), np.array([bw["DIC"] * rho]), np.array([bw["NH4"] * rho]),
+                         np.array([bw["PO4"] * rho]), np.array([bw["SO4"] * rho]), np.array([bw["H2S"] * rho]),
+                         self, np.array([1e-8 * rho]), 80)[0]
         else:
-            return pH, CO3, Omega_calcite, Omega_aragonite
-
-
-# ============================================================================
-# RADI MODEL CLASS
-# ============================================================================
-
-class RADIModel:
-    """
-    The main RADI diagenetic model solver.
-
-    This class handles:
-    - Grid generation and depth-dependent parameters
-    - Transport equations (solute diffusion, irrigation, advection; solid bioturbation, advection)
-    - Generic reaction network
-    - Time integration via scipy.integrate.solve_ivp with BDF method
-    """
-
-    def __init__(self, species_list: List[Species], reaction_list: List[Reaction],
-                 environment: Environment):
-        """
-        Initialize the RADI model.
-
-        Parameters
-        ----------
-        species_list : List[Species]
-            List of chemical species definitions
-        reaction_list : List[Reaction]
-            List of reactions
-        environment : Environment
-            Physical/chemical environment
-        """
-        self.species_list = species_list
-        self.species = {s.name: s for s in species_list}
-        self.reaction_list = reaction_list
-        self.env = environment
-
-        # Build ordered lists for indexing
-        self.species_names = [s.name for s in species_list]
-        self.n_species = len(species_list)
-
-        # Pre-compute name-to-index mapping for fast lookups
-        self.species_idx = {name: i for i, name in enumerate(self.species_names)}
-
-        # Classify solutes and solids
-        self.solute_names = [s.name for s in species_list if s.species_type == "solute"]
-        self.solid_names = [s.name for s in species_list if s.species_type == "solid"]
-        self.n_solutes = len(self.solute_names)
-        self.n_solids = len(self.solid_names)
-
-        # Pre-compute solute index mapping
-        self.solute_idx = {name: i for i, name in enumerate(self.solute_names)}
-
-        # Grid and parameters
-        self._setup_grid()
-        self._setup_parameters()
-        self._build_jacobian_sparsity()
-
-        # Carbonate system (only if DIC present AND solve_carbonate is True)
-        self.carb_sys = None
-        if "DIC" in self.species and self.env.solve_carbonate:
-            self.carb_sys = CarbonateSystem(environment.T, environment.S, environment.P)
-
-    def _setup_grid(self):
-        """Generate depth grid and precompute geometries."""
-        self.z_centers, self.z_edges, self.dz = generate_grid(
-            self.env.depth_sed, self.env.Nz,
-            self.env.dz_top, self.env.dz_bot
-        )
-        self.Nz = self.env.Nz
-
-    def _setup_parameters(self):
-        """Precompute porosity, diffusivities, burial velocities, etc."""
-        z = self.z_centers
-        dz = self.dz
-
-        # Porosity profile
-        self.phi = (self.env.phi0 - self.env.phi_inf) * np.exp(-self.env.beta * z) + self.env.phi_inf
-        self.phi_s = 1.0 - self.phi
-
-        # Tortuosity squared (Boudreau)
-        self.tort2 = 1.0 - 2.0 * np.log(self.phi)
-        self.tort2 = np.maximum(self.tort2, 0.1)  # avoid singularities
-
-        # Diffusivities (solutes only)
-        self.D_eff = np.zeros((self.n_solutes, self.Nz))
-        for i, sp_name in enumerate(self.solute_names):
-            sp = self.species[sp_name]
-            D_T = sp.D0 + sp.D_T_coeff * self.env.T
-            self.D_eff[i, :] = D_T
-
-        # Diffusivity gradients (for advection correction)
-        self.DFF = np.zeros((self.n_solutes, self.Nz))
-        for i in range(self.n_solutes):
-            # Central differences for d(ln(D/tort2))/dz
-            D_tort = self.D_eff[i, :] / self.tort2
-            for k in range(1, self.Nz - 1):
-                dD_tort = (D_tort[k + 1] - D_tort[k - 1]) / (2.0 * dz[k])
-                self.DFF[i, k] = dD_tort / D_tort[k]
-            # Boundary: one-sided
-            self.DFF[i, 0] = (D_tort[1] - D_tort[0]) / dz[0] / D_tort[0]
-            self.DFF[i, -1] = (D_tort[-1] - D_tort[-2]) / dz[-1] / D_tort[-1]
-
-        # Bioturbation coefficient (solids)
-        self.D_bio = self.env.D_bio_0 * np.exp(-(z / self.env.lambda_b)**2)
-
-        # Irrigation coefficient (solutes)
-        self.alpha = self.env.alpha0 * np.exp(-(z / self.env.lambda_i)**2)
-
-        # Burial velocities (to be computed dynamically)
-        self.w_inf = 1.0e-5  # default [m/yr], will update based on solid fluxes
-
-    def _compute_burial_velocity(self, u: np.ndarray) -> float:
-        """
-        Estimate burial velocity from total solid flux.
-
-        Parameters
-        ----------
-        u : ndarray of shape (n_species * Nz,)
-            Current state vector
-
-        Returns
-        -------
-        w_inf : float
-            Burial velocity [m/yr]
-        """
-        if self.n_solids == 0:
-            return 1.0e-5  # default if no solids
-
-        # Extract solid concentrations
-        total_solid_flux = 0.0
-        for j, sp_name in enumerate(self.solid_names):
-            sp = self.species[sp_name]
-            # Boundary flux (top of sediment)
-            if sp.bc_top_type == "flux":
-                total_solid_flux += sp.bc_top_value
-
-        # Convert flux to burial velocity
-        # flux = rho_sed * phi_s_inf * w_inf
-        rho_sed = 2650.0  # kg/m³
-        phi_s_inf = 1.0 - self.env.phi_inf
-
-        if total_solid_flux > 1.0e-10:
-            w_inf = total_solid_flux / (rho_sed * phi_s_inf)
-        else:
-            w_inf = 1.0e-5
-
-        return max(w_inf, 1.0e-6)
-
-    def _build_jacobian_sparsity(self):
-        """
-        Build sparse Jacobian pattern.
-
-        Each species at depth k couples to:
-        - itself at k-1, k, k+1 (transport)
-        - other species at k (reactions)
-        """
-        n_odes = self.n_species * self.Nz
-        jac_sparsity = lil_matrix((n_odes, n_odes))
-
-        for k in range(self.Nz):
-            # Each species at depth k
-            for i in range(self.n_species):
-                row = i * self.Nz + k
-
-                # Couples to all species at same depth k (reactions)
-                for j in range(self.n_species):
-                    col = j * self.Nz + k
-                    jac_sparsity[row, col] = 1
-
-                # Couples to own species at k-1, k+1 (transport)
-                if k > 0:
-                    jac_sparsity[row, row - 1] = 1
-                if k < self.Nz - 1:
-                    jac_sparsity[row, row + 1] = 1
-
-        self.jac_sparsity = csc_matrix(jac_sparsity)
-
-    def _get_carbonate_speciation(self, DIC: np.ndarray, ALK: np.ndarray) -> Dict:
-        """
-        Compute carbonate speciation and saturation states.
-
-        Parameters
-        ----------
-        DIC : ndarray of shape (Nz,)
-            [mol/m³]
-        ALK : ndarray of shape (Nz,)
-            [mol/m³]
-
-        Returns
-        -------
-        dict with keys: pH, CO3, HCO3, Omega_calcite, Omega_aragonite (all shape Nz,)
-        """
-        if self.carb_sys is None:
-            return {}
-
-        # Convert from mol/m³ to mol/kg-SW
-        rho_sw = sw_density(self.env.T, self.env.S, self.env.P)
-        DIC_kg = DIC / rho_sw
-        ALK_kg = ALK / rho_sw
-
-        pH, CO3_kg, Omega_cal, Omega_ara = self.carb_sys.solve_alkalinity(DIC_kg, ALK_kg)
-
-        return {
-            "pH": pH,
-            "CO3": CO3_kg * rho_sw,  # back to mol/m³
-            "Omega_calcite": Omega_cal,
-            "Omega_aragonite": Omega_ara,
-        }
-
-    def _compute_reaction_rates(self, u_matrix: np.ndarray) -> np.ndarray:
-        """
-        Compute reaction rate matrix for all species at all depths.
-
-        Parameters
-        ----------
-        u_matrix : ndarray of shape (n_species, Nz)
-            State matrix: u_matrix[i, k] = species i at depth k
-
-        Returns
-        -------
-        rates_matrix : ndarray of shape (n_species, Nz)
-            Net reaction rate for each species at each depth [mol/m³/yr]
-        """
-        rates_matrix = np.zeros((self.n_species, self.Nz))
-
-        # Get carbonate speciation if available (vectorized)
-        carb_info = {}
-        if "DIC" in self.species:
-            j_dic = self.species_idx["DIC"]
-            j_alk = self.species_idx.get("ALK", None)
-            if j_alk is not None:
-                dic_profile = u_matrix[j_dic, :]
-                alk_profile = u_matrix[j_alk, :]
-                carb_info = self._get_carbonate_speciation(dic_profile, alk_profile)
-
-        # Loop over reactions
-        for rxn in self.reaction_list:
-            # Build rate law based on rate_type (vectorized over all depths)
-            if rxn.rate_type == "mass_action":
-                # R = k * product(c[reactant_i]^stoich_i for all reactants)
-                rate = np.full(self.Nz, rxn.rate_constant, dtype=np.float64)
-                for reactant_name, stoich in rxn.reactants:
-                    j_reactant = self.species_idx[reactant_name]
-                    c_reactant = np.maximum(u_matrix[j_reactant, :], 1e-30)
-                    rate = rate * (c_reactant ** float(stoich))
-
-            elif rxn.rate_type == "monod":
-                # R = k * c[substrate] * c[monod_species] / (KM + c[monod_species])
-                # Must multiply by substrate (first reactant) to match RADI.jl
-                j_mon = self.species_idx[rxn.monod_species]
-                c_mon = u_matrix[j_mon, :]
-                rate = float(rxn.rate_constant) * c_mon / (float(rxn.half_saturation) + c_mon)
-                # Multiply by first reactant (substrate) concentration
-                if rxn.reactants:
-                    j_sub = self.species_idx[rxn.reactants[0][0]]
-                    c_sub = np.maximum(u_matrix[j_sub, :], 0.0)
-                    rate *= c_sub
-
-            elif rxn.rate_type == "inhibited_monod":
-                # R = k * c[substrate] * c[monod] / (KM + c[monod]) * prod(KI/(KI+c[inh]))
-                # Must multiply by substrate (first reactant) to match RADI.jl
-                j_mon = self.species_idx[rxn.monod_species]
-                c_mon = u_matrix[j_mon, :]
-                rate = float(rxn.rate_constant) * c_mon / (float(rxn.half_saturation) + c_mon)
-                # Multiply by first reactant (substrate) concentration
-                if rxn.reactants:
-                    j_sub = self.species_idx[rxn.reactants[0][0]]
-                    c_sub = np.maximum(u_matrix[j_sub, :], 0.0)
-                    rate *= c_sub
-
-                # Apply inhibition factors (vectorized)
-                for inh_name, KI in rxn.inhibitors:
-                    j_inh = self.species_idx[inh_name]
-                    c_inh = u_matrix[j_inh, :]
-                    rate *= float(KI) / (float(KI) + c_inh)
-
-            elif rxn.rate_type == "saturation":
-                # For CaCO3 dissolution (saturation-state dependent)
-                if "Omega_calcite" in carb_info and rxn.name.lower() == "calcite_dissolution":
-                    # Calcite dissolution (Naviaux et al. 2019)
-                    Omega = carb_info["Omega_calcite"]
-                    if "calcite" in self.species_idx:
-                        j_cal = self.species_idx["calcite"]
-                        calcite_conc = u_matrix[j_cal, :]
-                        # Vectorized saturation rate (two-regime kinetics)
-                        # Regime 1 (Ω > 0.8275): k_near = 0.00632, n = 0.11
-                        # Regime 2 (Ω ≤ 0.8275): k_far = 20.0, n = 4.7
-                        rate = np.where(
-                            Omega <= 0.8275,
-                            20.0 * calcite_conc * (1.0 - Omega)**4.7,
-                            np.where(
-                                Omega <= 1.0,
-                                0.00632 * calcite_conc * (1.0 - Omega)**0.11,
-                                0.0
-                            )
-                        )
-                    else:
-                        rate = np.zeros(self.Nz)
-                elif "Omega_aragonite" in carb_info and rxn.name.lower() == "aragonite_dissolution":
-                    # Aragonite dissolution (Dong et al. 2019)
-                    Omega = carb_info["Omega_aragonite"]
-                    if "aragonite" in self.species_idx:
-                        j_ara = self.species_idx["aragonite"]
-                        aragonite_conc = u_matrix[j_ara, :]
-                        # Vectorized saturation rate (two-regime kinetics)
-                        # Regime 1 (Ω > 0.835): k_near = 0.0157, n = 0.13
-                        # Regime 2 (Ω ≤ 0.835): k_far = 7.76, n = 1.46
-                        rate = np.where(
-                            Omega <= 0.835,
-                            7.76 * aragonite_conc * (1.0 - Omega)**1.46,
-                            np.where(
-                                Omega <= 1.0,
-                                0.0157 * aragonite_conc * (1.0 - Omega)**0.13,
-                                0.0
-                            )
-                        )
-                    else:
-                        rate = np.zeros(self.Nz)
-                else:
-                    rate = np.zeros(self.Nz)
-
-            else:  # custom or unknown
-                rate = np.zeros(self.Nz)
-
-            # Apply stoichiometry to all reactants and products (vectorized)
-            for species_name, stoich in rxn.reactants:
-                j = self.species_idx[species_name]
-                rates_matrix[j, :] -= stoich * rate
-
-            for species_name, stoich in rxn.products:
-                j = self.species_idx[species_name]
-                rates_matrix[j, :] += stoich * rate
-
-        return rates_matrix
-
-    def rhs(self, t: float, u: np.ndarray) -> np.ndarray:
-        """
-        Right-hand side of the ODE system (fully vectorized).
-
-        Parameters
-        ----------
-        t : float
-            Time [years]
-        u : ndarray of shape (n_species * Nz,)
-            State vector: u[i*Nz + k] = species i at depth k
-
-        Returns
-        -------
-        dudt : ndarray of shape (n_species * Nz,)
-            Time derivative
-        """
-        dudt = np.zeros_like(u)
-
-        # Clamp concentrations to non-negative to avoid NaN from
-        # fractional exponents and singular Jacobians
-        u = np.maximum(u, 0.0)
-
-        # Reshape state to (n_species, Nz)
-        u_matrix = u.reshape((self.n_species, self.Nz))
-
-        # Tiny self-decay regularization to prevent singular Jacobian
-        # when transport vanishes (e.g. deep cells with zero bioturbation).
-        # This ensures every diagonal entry of the Jacobian is nonzero.
-        dudt -= 1.0e-6 * u
-
-        # Update burial velocity based on current fluxes
-        w_inf = self._compute_burial_velocity(u)
-
-        # Porewater burial velocity (shape Nz)
-        u_bur = w_inf * self.env.phi_inf / self.phi
-
-        # Solid burial velocity (shape Nz)
-        w_s = w_inf * (1.0 - self.env.phi_inf) / self.phi_s
-
-        # DBL thickness (for top boundary)
-        # Use override if provided, otherwise compute from current speed
-        if self.env.dbl_thickness_override is not None:
-            dbl = self.env.dbl_thickness_override
-        elif self.n_solutes > 0:
-            dbl = dbl_thickness(self.D_eff[0, 0], self.env.U)
-        else:
-            dbl = 1.0e-3
-
-        # Precompute reaction rates once for all species and depths
-        rates_matrix = self._compute_reaction_rates(u_matrix)
-
-        # Precompute grid spacings for interior cells
-        dz = self.dz
-        dz_p = 0.5 * (dz[1:-1] + dz[2:])      # spacing from k to k+1 for k=1..Nz-2
-        dz_m = 0.5 * (dz[:-2] + dz[1:-1])      # spacing from k-1 to k for k=1..Nz-2
-
-        # Process solutes (vectorized over depth cells within each species loop)
-        for i in range(self.n_solutes):
-            sp_idx = None
-            for idx, sp in enumerate(self.species_list):
-                if sp.name == self.solute_names[i]:
-                    sp_idx = idx
-                    break
-            if sp_idx is None:
+            H = 10.0 ** (-pH0) * rho
+        self.H_init = float(H)
+
+        # ---- species list (core + user), transport coefficients ----
+        self.species = [dict(id=s[0], label=s[1], phase=s[2], core=True) for s in CORE] + self.ext.species
+        self.nvar = len(self.species)
+        self.solid = np.array([s["phase"] == "solid" for s in self.species])
+        dbl_cfg = cfg.get("DBL_THICKNESS", 1000.0)
+        self.dbl_auto = isinstance(dbl_cfg, str) and dbl_cfg.strip().lower() == "auto"
+        perm = _num(cfg, "PERMEABILITY")
+        self.Dfree, self.Ds, self.dbl, self.Cw = {}, {}, {}, {}
+        for s in self.species:
+            if s["phase"] != "solute":
                 continue
-
-            sp = self.species_list[sp_idx]
-            c = u_matrix[sp_idx, :]  # shape (Nz,)
-
-            # Get this solute's diffusivity and other transport params
-            D_eff = self.D_eff[i, :]
-            DFF = self.DFF[i, :]
-            tort2 = self.tort2
-
-            # Get reaction rates for this species
-            rxn_rates = rates_matrix[sp_idx, :]
-
-            # Interior cells (k = 1, ..., Nz-2) - fully vectorized
-            k_int = np.arange(1, self.Nz - 1)
-
-            # Extract profiles at needed points
-            c_p = c[2:]           # c[k+1] for k=1..Nz-2
-            c_0 = c[1:-1]         # c[k] for k=1..Nz-2
-            c_m = c[:-2]          # c[k-1] for k=1..Nz-2
-
-            # Diffusion (centered finite differences)
-            D_tort_p = D_eff[2:] / tort2[2:]
-            D_tort_0 = D_eff[1:-1] / tort2[1:-1]
-            D_tort_m = D_eff[:-2] / tort2[:-2]
-
-            diff_term = (D_tort_p * (c_p - c_0) / dz_p - D_tort_m * (c_0 - c_m) / dz_m) / dz[1:-1]
-
-            # Advection (with diffusivity gradient correction)
-            flux_adv_bottom = (u_bur[2:] - D_tort_p * DFF[2:]) * c_p
-            flux_adv_top = (u_bur[1:-1] - D_tort_0 * DFF[1:-1]) * c_0
-            adv_term = -(flux_adv_bottom - flux_adv_top) / dz[1:-1]
-
-            # Irrigation
-            c_w = sp.bc_top_value
-            irr_term = self.alpha[1:-1] * (c_w - c_0)
-
-            dudt[sp_idx * self.Nz + 1:(sp_idx + 1) * self.Nz - 1] = diff_term + adv_term + irr_term + rxn_rates[1:-1]
-
-            # Top cell (k = 0)
-            k = 0
-            dz_12_p = 0.5 * (dz[k] + dz[k + 1])
-
-            # SWI boundary (two-resistor model matching RADI.jl)
-            # Julia: D_tort2 * (2*(c2-c1) + TR*(cw-c1)) / z_res²
-            # where TR = 2*z_res*tort2/dbl
-            D_w = D_eff[0]                      # molecular diffusivity [m²/yr]
-            D_s = D_eff[0] / tort2[0]           # sediment diffusivity [m²/yr]
-
-            c_w = sp.bc_top_value
-
-            # SWI flux via two-resistor: G_dbl in series with G_cell
-            G_dbl = D_w / dbl                       # DBL conductance
-            G_cell = D_s / (0.5 * dz[0])            # sediment half-cell conductance
-            G_series = 1.0 / (1.0 / G_dbl + 1.0 / G_cell)
-
-            # Factor 2 accounts for the half-cell distance from SWI to cell center
-            # No 1/phi — consistent with Julia code and interior formula
-            diff_swi = 2.0 * G_series * (c_w - c[k]) / dz[k]
-
-            # Diffusive flux from cell 1 into cell 0 (same sign convention as interior)
-            diff_int = D_s * (c[1] - c[0]) / dz_12_p / dz[0]
-
-            # Advection
-            D_s_1 = D_eff[1] / tort2[1]
-            flux_adv_bottom = (u_bur[1] - D_s_1 * DFF[1]) * c[1]
-            adv_term = -flux_adv_bottom / dz[0]
-
-            # Irrigation
-            irr_term = self.alpha[0] * (c_w - c[0])
-
-            dudt[sp_idx * self.Nz + 0] = diff_swi + diff_int + adv_term + irr_term + rxn_rates[0]
-
-            # Bottom cell (k = Nz-1)
-            k = self.Nz - 1
-            dz_12_m = 0.5 * (dz[k - 1] + dz[k])
-
-            # Zero-gradient bottom: no flux from below
-            D_tort_km1 = D_eff[k - 1] / tort2[k - 1]
-            D_tort_k = D_eff[k] / tort2[k]
-            diff_term = -D_tort_k * (c[k] - c[k - 1]) / dz_12_m / dz[k]
-
-            # Advection: zero-gradient bottom means outgoing flux ≈ incoming flux → net ≈ 0
-            adv_term = 0.0
-
-            # Irrigation
-            irr_term = self.alpha[k] * (c_w - c[k])
-
-            dudt[sp_idx * self.Nz + k] = diff_term + adv_term + irr_term + rxn_rates[k]
-
-        # Process solids (vectorized over depth cells within each species loop)
-        for i in range(self.n_solids):
-            sp_idx = None
-            for idx, sp in enumerate(self.species_list):
-                if sp.name == self.solid_names[i]:
-                    sp_idx = idx
-                    break
-            if sp_idx is None:
-                continue
-
-            sp = self.species_list[sp_idx]
-            c = u_matrix[sp_idx, :]  # shape (Nz,)
-
-            # Get reaction rates for this species
-            rxn_rates = rates_matrix[sp_idx, :]
-
-            D_bio = self.D_bio
-
-            # Interior cells (k = 1, ..., Nz-2) - fully vectorized
-            k_int = np.arange(1, self.Nz - 1)
-
-            c_p = c[2:]
-            c_0 = c[1:-1]
-            c_m = c[:-2]
-
-            # Bioturbation (centered)
-            bioturb = (D_bio[2:] * (c_p - c_0) / dz_p - D_bio[1:-1] * (c_0 - c_m) / dz_m) / dz[1:-1]
-
-            # Advection with Fiadeiro-Veronis upwind weighting
-            Peh_m = w_s[1:-1] * dz_m / np.maximum(D_bio[1:-1], 1e-20)
-            Peh_p = w_s[2:] * dz_p / np.maximum(D_bio[2:], 1e-20)
-
-            # Coth approximation (vectorized)
-            sigma_m = np.where(
-                np.abs(Peh_m) < 0.01,
-                0.0,
-                1.0 / np.tanh(Peh_m) - 1.0 / Peh_m
-            )
-            sigma_p = np.where(
-                np.abs(Peh_p) < 0.01,
-                0.0,
-                1.0 / np.tanh(Peh_p) - 1.0 / Peh_p
-            )
-
-            # Weighted advection
-            flux_adv_bottom = w_s[2:] * (c_p * (1.0 - sigma_p) + c_0 * sigma_p)
-            flux_adv_top = w_s[1:-1] * (c_0 * (1.0 - sigma_m) + c_m * sigma_m)
-            adv_term = -(flux_adv_bottom - flux_adv_top) / dz[1:-1]
-
-            dudt[sp_idx * self.Nz + 1:(sp_idx + 1) * self.Nz - 1] = bioturb + adv_term + rxn_rates[1:-1]
-
-            # Top cell (k = 0): flux boundary
-            k = 0
-            dz_12_p = 0.5 * (dz[k] + dz[k + 1])
-
-            # Top flux (prescribed)
-            if sp.bc_top_type == "flux":
-                flux_top = sp.bc_top_value / self.phi_s[k]  # convert to concentration rate
+            sid = s["id"]
+            if s["core"]:
+                a, b = D_COEF[sid]
+                D = a + b * T
+                Cw = bw[sid] * rho
             else:
-                flux_top = 0.0
+                D = s["D0"] + s["DT"] * T
+                Cw = s["bw"] * 1e-6 * rho
+            self.Dfree[sid] = D
+            self.Ds[sid] = _ksed(D, T, U, perm) / self.tort2
+            self.dbl[sid] = _dbl_species(D, T, U) if self.dbl_auto else float(dbl_cfg) * 1e-6
+            self.Cw[sid] = Cw
+        self.ext.finalize(self)
+        self._build_transport()
 
-            # Bioturbative flux from cell 1 into cell 0 (same sign convention as interior)
-            bioturb = D_bio[k] * (c[k + 1] - c[k]) / dz_12_p / dz[k]
+    # ---- linear transport operator: dC/dt = Tdiag*C + Tup*C(k+1) + Tlow*C(k-1) + Tconst ----
+    def _build_transport(self):
+        Nz, nv, dx = self.Nz, self.nvar, self.dx
+        n = Nz * nv
+        Tdiag = np.zeros(n); Tup = np.zeros(n); Tlow = np.zeros(n); Tconst = np.zeros(n)
+        dzc = 0.5 * (dx[:-1] + dx[1:])
+        for i, s in enumerate(self.species):
+            if s["phase"] == "solute":
+                Ds = self.Ds[s["id"]]
+                por, vel = self.phi, self.u_bur
+            else:
+                Ds = self.D_bio
+                por, vel = self.phiS, self.w
+            pDf = 0.5 * (por[:-1] * Ds[:-1] + por[1:] * Ds[1:])
+            Df = 0.5 * (Ds[:-1] + Ds[1:])
+            Pe = 0.5 * vel[:-1] * dzc / np.maximum(Df, 1e-30)
+            sg = fv_sigma(Pe)
+            # face flux J_{k+1/2} = a_k C_k + b_k C_{k+1}
+            a = pDf / dzc + por[:-1] * vel[:-1] * 0.5 * (1.0 + sg)
+            b = -pDf / dzc + por[:-1] * vel[:-1] * 0.5 * (1.0 - sg)
+            vol = por * dx
+            diag = np.zeros(Nz); low = np.zeros(Nz); up = np.zeros(Nz); const = np.zeros(Nz)
+            # Jdn
+            diag[:-1] -= a
+            up[:-1] -= b
+            diag[-1] -= por[-1] * vel[-1]
+            # Jup
+            low[1:] += a
+            diag[1:] += b
+            if s["phase"] == "solute":
+                sid = s["id"]
+                Cw = self.Cw[sid]
+                G = 1.0 / (self.dbl[sid] / self.Dfree[sid] + 0.5 * dx[0] / (por[0] * Ds[0]))
+                diag[0] -= G
+                const[0] += G * Cw + por[0] * vel[0] * Cw
+                diag /= vol; low /= vol; up /= vol; const /= vol
+                diag -= self.alpha
+                const += self.alpha * Cw
+            else:
+                const[0] += self.rain_of(s["id"])
+                diag /= vol; low /= vol; up /= vol; const /= vol
+            Tdiag[i::nv] = diag
+            Tup[i::nv] = up
+            Tlow[i::nv] = low
+            Tconst[i::nv] = const
+        self.Tdiag, self.Tup, self.Tlow, self.Tconst = Tdiag, Tup, Tlow, Tconst
 
-            # Advection
-            Peh_p = w_s[k + 1] * dz_12_p / np.maximum(D_bio[k + 1], 1e-20)
-            sigma_p = 0.0 if np.abs(Peh_p) < 0.01 else 1.0 / np.tanh(Peh_p) - 1.0 / Peh_p
-            flux_adv_bottom = w_s[k + 1] * (c[k + 1] * (1.0 - sigma_p) + c[k] * sigma_p)
-            adv_term = -flux_adv_bottom / dz[k]
+    def rain_of(self, sid):
+        if sid in self.rain:
+            return self.rain[sid]
+        return self.ext.rain.get(sid, 0.0)
 
-            dudt[sp_idx * self.Nz + k] = flux_top + bioturb + adv_term + rxn_rates[k]
+    def transport(self, uv):
+        nv = self.nvar
+        y = self.Tdiag * uv + self.Tconst
+        y[:-nv] += self.Tup[:-nv] * uv[nv:]
+        y[nv:] += self.Tlow[nv:] * uv[:-nv]
+        return y
 
-            # Bottom cell (k = Nz-1): zero-gradient
-            k = self.Nz - 1
-            dz_12_m = 0.5 * (dz[k - 1] + dz[k])
-
-            # Bioturbation: zero-gradient from below
-            bioturb = -D_bio[k] * (c[k] - c[k - 1]) / dz_12_m / dz[k]
-
-            # Advection: zero-gradient means outgoing flux = w_s * c[k]
-            Peh_m = w_s[k] * dz_12_m / np.maximum(D_bio[k], 1e-20)
-            sigma_m = 0.0 if np.abs(Peh_m) < 0.01 else 1.0 / np.tanh(Peh_m) - 1.0 / Peh_m
-            flux_adv_top = w_s[k] * (c[k] * (1.0 - sigma_m) + c[k - 1] * sigma_m)
-            flux_adv_bottom = w_s[k] * c[k]  # zero-gradient: c_ghost = c[k]
-            adv_term = -(flux_adv_bottom - flux_adv_top) / dz[k]
-
-            dudt[sp_idx * self.Nz + k] = bioturb + adv_term + rxn_rates[k]
-
-        return dudt
-
-    def solve(self, callback: Optional[Callable] = None) -> Dict:
-        """
-        Solve the model using scipy's solve_ivp with BDF method.
-
-        Parameters
-        ----------
-        callback : callable, optional
-            Callback function(t, progress_fraction) for progress reporting
-
-        Returns
-        -------
-        dict with keys:
-            - z_centers: depth array [m]
-            - z_edges: cell edge depths [m]
-            - species_names: list of species names
-            - species_data: dict {species_name: {t: [...], profile: [...], ...}}
-            - solution: scipy sol object
-            - success: bool
-        """
-        # Build initial condition (floor at tiny positive to avoid singular Jacobian)
-        u0 = np.zeros(self.n_species * self.Nz)
-        for i, sp in enumerate(self.species_list):
-            val = max(sp.initial_value, 1.0e-20)
-            u0[i * self.Nz:(i + 1) * self.Nz] = val
-
-        # Solve
-        t_start, t_end = self.env.tspan
-
-        # Wrap rhs to track progress and periodically report it
-        import time as _time
-        _last_report = [_time.monotonic()]
-        _max_t = [t_start]
-
-        def rhs_with_progress(t, u):
-            if t > _max_t[0]:
-                _max_t[0] = t
-            now = _time.monotonic()
-            # Report at most every 0.15 s to avoid slowing the solver
-            if now - _last_report[0] >= 0.15:
-                _last_report[0] = now
-                frac = min((_max_t[0] - t_start) / (t_end - t_start), 1.0)
-                if callback is not None:
-                    callback(_max_t[0], frac)
-            return self.rhs(t, u)
-
-        # Compute output time points if requested for transient mode
-        t_eval = None
-        if self.env.t_eval_points is not None and self.env.mode == "transient":
-            t_eval = np.linspace(self.env.tspan[0], self.env.tspan[1], self.env.t_eval_points)
-
-        # Try Radau first (most robust for stiff + near-singular),
-        # fall back to BDF, then LSODA if both fail.
-        methods_to_try = [
-            ("Radau", dict(jac_sparsity=self.jac_sparsity)),
-            ("BDF",   dict(jac_sparsity=self.jac_sparsity)),
-            ("Radau", dict()),  # dense Jacobian fallback
-            ("LSODA", dict()),
-        ]
-
-        sol = None
-        attempt = 0
-        n_methods = len(methods_to_try) + 1  # +1 for RK45 fallback
-        for method, extra_opts in methods_to_try:
-            attempt += 1
-            # Reset progress tracker for each attempt
-            _max_t[0] = t_start
-            _last_report[0] = _time.monotonic()
-            try:
-                sol = solve_ivp(
-                    rhs_with_progress,
-                    self.env.tspan,
-                    u0,
-                    method=method,
-                    rtol=1.0e-3,
-                    atol=1.0e-6,
-                    dense_output=True,
-                    first_step=1.0e-4,
-                    max_step=max(1000.0, (self.env.tspan[1] - self.env.tspan[0]) / 10.0),
-                    t_eval=t_eval,
-                    **extra_opts,
-                )
-                if sol.success:
-                    break
-            except (RuntimeError, ValueError):
-                continue
-
-        if sol is None:
-            # Last resort: explicit method (not ideal for stiff, but won't crash)
-            _max_t[0] = t_start
-            sol = solve_ivp(
-                rhs_with_progress, self.env.tspan, u0,
-                method="RK45", rtol=1e-3, atol=1e-6,
-                dense_output=True, t_eval=t_eval,
-                max_step=10.0,
-            )
-
-        # Final progress report
-        if callback is not None:
-            callback(t_end, 1.0)
-
-        # Clamp solution to non-negative (ODE solver can overshoot to small negatives)
-        if sol is not None and sol.y is not None:
-            sol.y = np.maximum(sol.y, 0.0)
-
-        return self._format_results(sol)
-
-    def _format_results(self, sol) -> Dict:
-        """Format scipy solution into user-friendly dict."""
-        results = {
-            "z_centers": self.z_centers,
-            "z_edges": self.z_edges,
-            "dz": self.dz,
-            "species_names": self.species_names,
-            "species_data": {},
-            "solution": sol,
-            "success": sol.status == 0,
-            "message": sol.message,
-        }
-
-        # Extract final profiles
-        u_final = sol.y[:, -1]
-        for i, sp_name in enumerate(self.species_names):
-            profile = u_final[i * self.Nz:(i + 1) * self.Nz]
-            species_data = {
-                "final_profile": profile,
-                "t_initial": sol.t[0],
-                "t_final": sol.t[-1],
-            }
-            
-            # Include all time point profiles if t_eval was used (transient with t_eval_points)
-            if self.env.t_eval_points is not None and self.env.mode == "transient":
-                # sol.y has shape (n_species * Nz, n_time_points)
-                all_profiles = []
-                for t_idx in range(sol.y.shape[1]):
-                    profile_t = sol.y[i * self.Nz:(i + 1) * self.Nz, t_idx]
-                    all_profiles.append(profile_t)
-                species_data["time_series_profiles"] = all_profiles
-                species_data["time_points"] = sol.t
-            
-            results["species_data"][sp_name] = species_data
-
-        return results
-
-    def estimate_runtime(self) -> float:
-        """
-        Estimate wall-clock runtime for this configuration.
-
-        Returns
-        -------
-        seconds : float
-            Rough estimate [seconds]
-        """
-        n_odes = self.n_species * self.Nz
-        t_range = self.env.tspan[1] - self.env.tspan[0]
-
-        # Empirical: ~0.001 sec per ODE per 1000 model-years
-        estimate = n_odes * 0.001 * (t_range / 1000.0)
-
-        return max(1.0, estimate)
+    def transport_abs(self, uv):
+        """Sum of the absolute values of the transport terms (a scale for relative convergence)."""
+        nv = self.nvar
+        y = np.abs(self.Tdiag * uv) + np.abs(self.Tconst)
+        y[:-nv] += np.abs(self.Tup[:-nv] * uv[nv:])
+        y[nv:] += np.abs(self.Tlow[nv:] * uv[:-nv])
+        return y
 
 
-# ============================================================================
-# BENCHMARK: W2 Station Configuration
-# ============================================================================
+# ---------------------------------------------------------------------------------------------------
+# 3. Porewater pH: Newton on total alkalinity, fixed number of iterations (H_solve_det)
+# ---------------------------------------------------------------------------------------------------
+def _solve_H(TA_m3, tCO2_m3, tNH4_m3, tPO4_m3, tSO4_m3, tH2S_m3, site, H0_m3, iters):
+    rho = site.rho; K = site.K
+    K1, K2, Kw = K["K1"] / rho, K["K2"] / rho, K["Kw"] / (rho * rho)
+    KB, KF, KSO4 = K["KB"] / rho, K["KF"] / rho, K["KSO4"] / rho
+    KP1, KP2, KP3 = K["KP1"] / rho, K["KP2"] / rho, K["KP3"] / rho
+    KSi, KNH3, KH2S = K["KSi"] / rho, K["KNH3"] / rho, K["KH2S"] / rho
+    TB, TF = K["TB"] / rho, K["TF"] / rho
+    TA = TA_m3 / rho; tCO2 = tCO2_m3 / rho; tNH4 = tNH4_m3 / rho
+    tPO4 = tPO4_m3 / rho; tSO4 = tSO4_m3 / rho; tH2S = tH2S_m3 / rho
+    dSi = site.dSi_inp / rho
+    H = np.clip(H0_m3 / rho, 1e-12, 1.0)
+    with np.errstate(all="ignore"):
+        for _ in range(iters):
+            alk_bor = TB * KB / (KB + H)
+            H2 = H * H; H3 = H2 * H
+            alk_nc = (tNH4 * KNH3 / (KNH3 + H) + alk_bor
+                      + (-TF / (1.0 + KF / H))
+                      + tPO4 * (KP1 * KP2 * H + 2.0 * KP1 * KP2 * KP3 - H3) / (H3 + KP1 * H2 + KP1 * KP2 * H + KP1 * KP2 * KP3)
+                      + dSi * KSi / (KSi + H)
+                      + (-tSO4 / (1.0 + KSO4 / H))
+                      + tH2S * KH2S / (KH2S + H)
+                      + (Kw / H - H))
+            den = H2 + K1 * H + K1 * K2
+            alk_c = tCO2 * K1 * (H + 2.0 * K2) / den
+            res = TA - (alk_c + alk_nc)
+            dAlk = -(tCO2 * K1 * (H2 + K1 * K2 + 4.0 * H * K2) / (den * den) + alk_bor / (KB + H) + Kw / H2 + 1.0)
+            ok = np.isfinite(dAlk) & (np.abs(dAlk) > 1e-18)
+            delta = np.where(ok, res / np.where(ok, dAlk, 1.0), 0.0)
+            ok2 = ok & np.isfinite(delta)
+            H = np.where(ok2, np.clip(H + delta, 1e-12, 1.0), H)
+    return H * rho
 
-def create_w2_benchmark() -> RADIModel:
+
+def solve_pH(site, U, H0, iters):
+    """[H+] (mol m-3) for each column of the state block U (nvar x M), from the guess H0 (M)."""
+    nzc = lambda x: np.maximum(x, 0.0)
+    H = _solve_H(nzc(U[IDX["TA"]]), nzc(U[IDX["DIC"]]), nzc(U[IDX["NH4"]]), nzc(U[IDX["PO4"]]),
+                 nzc(U[IDX["SO4"]]), nzc(U[IDX["H2S"]]), site, np.clip(H0, HMIN, HMAX), iters)
+    return np.clip(H, HMIN, HMAX)
+
+
+# ---------------------------------------------------------------------------------------------------
+# 4. Reactions (React.jl + rates_wD!), vectorised over columns
+# ---------------------------------------------------------------------------------------------------
+NDIAG = 7   # Rdeg_dO2, Rdeg_dtNO3, Rdeg_dtSO4, Rdeg_pFeOH3, Rdeg_pMnO2, Rdeg_dCH4, Rdeg_total (solid basis)
+DIAG_NAMES = ["aerobic_respiration", "denitrification", "sulfate_reduction", "iron_reduction",
+              "manganese_reduction", "methanogenesis", "total_Corg_degradation"]
+
+
+def _calcite_rate(Om, pcal, law):
+    """Calcite dissolution (per m3 solid per yr); smoothed two-regime Naviaux et al. (2019)."""
+    om = 1.0 - Om
+    with np.errstate(all="ignore"):
+        w = 1.0 / (1.0 + np.exp(-(Om - law["SCROSS"]) / law["SBLEND"]))
+        Rnear = 0.00632 * law["KCAL1_MULT"] * law["KCAL_MULT"] * np.power(np.maximum(om, 0.0), law["N1EXP"])
+        Rfar = 20.0 * law["KCAL_MULT"] * np.power(np.maximum(om, 0.0), 4.7)
+        R = w * Rnear + (1.0 - w) * Rfar
+    return np.where(Om < 1.0, pcal * R, 0.0)
+
+
+def core_rates(site, U, H, kfast, kslow, p2d, law=LAW):
+    """Reaction rates of the 18 core species (rows) for each column of U (core rows only, any values:
+    negatives are clamped to zero as in the Julia engine). Returns (R[18,M], diag[7,M], Omega_ca[M])."""
+    C = np.maximum(U[:NCORE], 0.0)
+    dO2, dtCO2, dtNO3, dtSO4, dtPO4, dtNH4, dtH2S, dFeII, dMnII, dCH4, dalk, dCa = C[:12]
+    pfoc, psoc, pFeOH3, pMnO2, pcal, parag = C[12:18]
+    K1, K2, KCa, KAr = site.K["K1"], site.K["K2"], site.K["KCa"], site.K["KAr"]
+    RC, RN, RP = site.RC, site.RN, site.RP
+    dCO3 = (dtCO2 * K1 * K2) / (K1 * K2 + K1 * H + H * H)
+    pfoc_k = pfoc * kfast
+    psoc_k = psoc * kslow
+    # degradation factors (Boudreau 1996 / Couture et al. 2010)
+    Mi_dO2 = KMi_dO2 / (KMi_dO2 + dO2)
+    Mi_dtNO3 = KMi_dtNO3 / (KMi_dtNO3 + dtNO3)
+    Mi_pMnO2 = KMi_pMnO2 / (KMi_pMnO2 + pMnO2)
+    Mi_pFeOH3 = KMi_pFeOH3 / (KMi_pFeOH3 + pFeOH3)
+    Mi_dtSO4 = KMi_dtSO4 / (KMi_dtSO4 + dtSO4)
+    fdO2 = dO2 / (KM_dO2 + dO2)
+    fdtNO3 = Mi_dO2 * dtNO3 / (KM_dtNO3 + dtNO3)
+    fpMnO2 = Mi_dO2 * Mi_dtNO3 * pMnO2 / (KM_pMnO2 + pMnO2)
+    fpFeOH3 = Mi_dO2 * Mi_dtNO3 * Mi_pMnO2 * pFeOH3 / (KM_pFeOH3 + pFeOH3)
+    fdtSO4 = Mi_dO2 * Mi_dtNO3 * Mi_pMnO2 * Mi_pFeOH3 * dtSO4 / (KM_dtSO4 + dtSO4)
+    fdCH4 = Mi_dO2 * Mi_dtNO3 * Mi_pMnO2 * Mi_pFeOH3 * Mi_dtSO4
+    fox = fdO2 + fdtNO3 + fpMnO2 + fpFeOH3 + fdtSO4 + fdCH4
+    Rdeg_dO2 = fdO2 * pfoc_k + fdO2 * psoc_k
+    Rdeg_dtNO3 = fdtNO3 * pfoc_k + fdtNO3 * psoc_k
+    Rdeg_pMnO2 = fpMnO2 * pfoc_k + fpMnO2 * psoc_k
+    Rdeg_pFeOH3 = fpFeOH3 * pfoc_k + fpFeOH3 * psoc_k
+    Rdeg_dtSO4 = fdtSO4 * pfoc_k + fdtSO4 * psoc_k
+    Rdeg_dCH4 = fdCH4 * pfoc_k + fdCH4 * psoc_k
+    Rfast_total = fox * pfoc_k
+    Rslow_total = fox * psoc_k
+    Rdeg_total = Rfast_total + Rslow_total
+    # second-order re-oxidation (RADIv1 constants)
+    R_NH3 = k_NH3 * dtNH4 * dO2
+    R_H2S = k_H2S * dtH2S * dO2
+    R_FeII = k_FeII * dFeII * dO2
+    R_MnII = k_MnII * dMnII * dO2
+    R_CH4_O2 = k_CH4_O2 * dCH4 * dO2
+    R_CH4_SO4 = k_CH4_SO4 * dCH4 * dtSO4
+    # CaCO3
+    OmCa = dCa * dCO3 / KCa
+    OmAr = dCa * dCO3 / KAr
+    Rdiss_cal = _calcite_rate(OmCa, pcal, law)
+    with np.errstate(all="ignore"):
+        x = 1.0 - OmAr
+        Rdiss_ar = np.where((OmAr > 0.835) & (OmAr <= 1.0), parag * 0.0038 * np.power(np.maximum(x, 0.0), 0.13),
+                            np.where(OmAr <= 0.835, parag * 0.042 * np.power(np.maximum(x, 0.0), 1.46), 0.0))
+        Rprec_cal = np.where(OmCa > 1.0, 0.4075 * np.power(np.maximum(OmCa - 1.0, 0.0), 1.76), 0.0)
+    Rdiss = Rdiss_cal + Rdiss_ar - Rprec_cal
+    d2p = 1.0 / p2d
+    R = np.empty((NCORE, C.shape[1]))
+    R[0] = p2d * -Rdeg_dO2 - (R_FeII / 4.0 + R_MnII / 2.0 + 2.0 * R_H2S + 2.0 * R_NH3) - 2.0 * R_CH4_O2
+    R[1] = p2d * (RC * (Rdeg_total - 0.5 * Rdeg_dCH4) + Rdiss) + R_CH4_O2 + R_CH4_SO4
+    R[2] = p2d * RC * (-0.8 * Rdeg_dtNO3) + R_NH3
+    R[3] = p2d * RC * (-0.5 * Rdeg_dtSO4) + R_H2S - R_CH4_SO4
+    R[4] = p2d * RP * Rdeg_total
+    R[5] = p2d * RN * Rdeg_total - R_NH3
+    R[6] = p2d * RC * (0.5 * Rdeg_dtSO4) - R_H2S + R_CH4_SO4
+    R[7] = p2d * RC * (4.0 * Rdeg_pFeOH3) - R_FeII
+    R[8] = p2d * RC * (2.0 * Rdeg_pMnO2) - R_MnII
+    R[9] = p2d * RC * (0.5 * Rdeg_dCH4) - R_CH4_O2 - R_CH4_SO4
+    R[10] = (p2d * ((RN - RP) * (Rdeg_dO2 + Rdeg_dCH4) + (RN - RP + 0.8 * RC) * Rdeg_dtNO3 +
+                    (RN - RP + 4.0 * RC) * Rdeg_pMnO2 + (RN - RP + 8.0 * RC) * Rdeg_pFeOH3 +
+                    (RN - RP + 1.0 * RC) * Rdeg_dtSO4 + 2.0 * Rdiss) +
+             2.0 * R_CH4_SO4 - 2.0 * (R_MnII + R_FeII + R_NH3 + R_H2S))
+    R[11] = p2d * Rdiss
+    R[12] = -Rfast_total
+    R[13] = -Rslow_total
+    R[14] = RC * (-4.0 * Rdeg_pFeOH3) + d2p * R_FeII
+    R[15] = RC * (-2.0 * Rdeg_pMnO2) + d2p * R_MnII
+    R[16] = -Rdiss_cal + Rprec_cal
+    R[17] = -Rdiss_ar
+    D = np.vstack([Rdeg_dO2, Rdeg_dtNO3, Rdeg_dtSO4, Rdeg_pFeOH3, Rdeg_pMnO2, Rdeg_dCH4, Rdeg_total])
+    extra = dict(OmegaCa=OmCa, OmegaAr=OmAr, CO3=dCO3, Rdiss_cal=Rdiss_cal, Rprec_cal=Rprec_cal, Rdiss_ar=Rdiss_ar)
+    return R, D, extra
+
+
+def all_rates(site, U, H, cellidx):
+    """Rates of every species (core + user) for the columns of U; cellidx maps columns to depth cells."""
+    p2d = site.phiS_phi[cellidx]
+    Rc, D, extra = core_rates(site, U, H, site.kfast[cellidx], site.kslow[cellidx], p2d)
+    if site.nvar == NCORE and not site.ext.reactions:
+        return Rc, D, extra
+    R = np.zeros((site.nvar, U.shape[1]))
+    R[:NCORE] = Rc
+    site.ext.add_rates(R, U, D, p2d, cellidx)
+    return R, D, extra
+
+
+# ---------------------------------------------------------------------------------------------------
+# 5. User species and reactions (the "builder")
+# ---------------------------------------------------------------------------------------------------
+class _Extensions:
+    """User-defined species and reactions on top of the RADI core.
+
+    extensions = {
+      "species": [
+         {"id": "Ba", "label": "Dissolved barium", "phase": "solute",
+          "D0": 0.0213, "DT": 0.0009,        # free-solution diffusion coefficient D = D0 + DT*T, m2/yr
+          "bw": 0.1},                         # bottom-water concentration, umol/kg
+         {"id": "Pb210", "label": "210Pb excess", "phase": "solid",
+          "rain": 1e-6,                       # rain at the seafloor, mol m-2 yr-1
+          "molar_mass": 0.0}                  # g/mol; adds rain*molar_mass to the solid mass flux (0 = trace)
+      ],
+      "reactions": [
+         {"name": "decay", "type": "first_order", "k": 0.0311, "reactant": "Pb210",
+          "stoich": {"Pb210": -1}},
+         {"name": "Ba release with organic C", "type": "per_Corg", "k": 0.001, "pathway": "total",
+          "stoich": {"Ba": 1}},
+         {"name": "X oxidation", "type": "mass_action", "k": 1e3, "reactants": ["X", "O2"],
+          "stoich": {"X": -1, "O2": -2, "TA": -2}},
+         {"name": "Y uptake", "type": "monod", "k": 5.0, "reactant": "Y",
+          "monod": [{"species": "O2", "K": 0.003}], "inhibition": [{"species": "H2S", "K": 0.01}],
+          "stoich": {"Y": -1}}
+      ]}
+
+    Rate laws (R in mol per m3 of the reference phase per yr; concentrations are clamped at zero):
+      first_order : R = k [A]                                   reference phase = phase of A
+      mass_action : R = k [A][B]  (or [A] alone, or [A][B][C])  reference phase = phase of A
+      monod       : R = k [A] * prod [L]/(K_L + [L]) * prod K_I/(K_I + [I])
+      zero_order  : R = k * prod Monod/inhibition terms          reference phase given by "phase"
+                    (production only: negative stoichiometry is refused)
+      per_Corg    : R = k * (organic C degradation rate of the chosen pathway, mol C per m3 solid per yr)
+                    reference phase = solid; pathway in total, aerobic, denitrification, manganese,
+                    iron, sulfate, methanogenesis
+    The tendency of species s is stoich[s] * R, converted between phases with phiS/phi (solid -> solute)
+    or phi/phiS (solute -> solid). Concentrations: solutes mol m-3 porewater, solids mol m-3 solid.
     """
-    Create a pre-configured RADI model for the W2 station.
+    PATHWAYS = {"aerobic": 0, "denitrification": 1, "sulfate": 2, "iron": 3, "manganese": 4,
+                "methanogenesis": 5, "total": 6}
 
-    This represents a typical deep ocean station with:
-    - T=1.4°C, S=34.69, P=4310 dbar
-    - 18 species (O2, DIC, ALK, NO3, SO4, NH4, H2S, Fe2, Mn2, CH4, Ca, etc.)
-    - Full redox cascade (O2 -> NO3 -> Mn -> Fe -> SO4)
-    - CaCO3 (calcite, aragonite) dissolution
-    - Organic matter degradation pathways
+    def __init__(self, spec, site):
+        spec = spec or {}
+        self.species, self.rain, self.reactions = [], {}, []
+        self._mass_flux = 0.0
+        taken = set(IDX)
+        for s in spec.get("species", []) or []:
+            sid = str(s.get("id", "")).strip()
+            if not sid or not sid.replace("_", "").isalnum() or not (sid[0].isalpha()):
+                raise ValueError(f"species id '{sid}': use letters, digits and _ only, starting with a letter")
+            if sid in taken:
+                raise ValueError(f"species id '{sid}' is already used")
+            taken.add(sid)
+            phase = s.get("phase", "solute")
+            if phase not in ("solute", "solid"):
+                raise ValueError(f"species '{sid}': phase must be 'solute' or 'solid'")
+            d = dict(id=sid, label=str(s.get("label", sid)), phase=phase, core=False,
+                     color=s.get("color"))
+            if phase == "solute":
+                D0 = float(s.get("D0", 0.0)); DT = float(s.get("DT", 0.0))
+                if not D0 + DT * site.T > 0:
+                    raise ValueError(f"solute '{sid}': the diffusion coefficient D0 + DT*T must be > 0 (m2/yr)")
+                d.update(D0=D0, DT=DT, bw=float(s.get("bw", 0.0)))
+                if d["bw"] < 0:
+                    raise ValueError(f"solute '{sid}': bottom-water concentration must be >= 0")
+            else:
+                rain = float(s.get("rain", 0.0)); mm = float(s.get("molar_mass", 0.0) or 0.0)
+                if rain < 0 or mm < 0:
+                    raise ValueError(f"solid '{sid}': rain and molar mass must be >= 0")
+                d.update(rain=rain, molar_mass=mm)
+                self.rain[sid] = rain
+                self._mass_flux += rain * mm
+            self.species.append(d)
+        self._spec_reactions = spec.get("reactions", []) or []
 
-    Returns
-    -------
-    model : RADIModel
-    """
+    def extra_solid_mass_flux(self):
+        return self._mass_flux
 
-    # Species definitions
-    species_list = [
-        # Solutes
-        Species(name="O2", long_name="Dissolved Oxygen", species_type="solute",
-                D0=0.031558, D_T_coeff=0.001428,
-                bc_top_type="concentration", bc_top_value=250.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=50.0, unit="μmol/kg", color="#0066FF"),
+    def finalize(self, site):
+        index = {s["id"]: i for i, s in enumerate(site.species)}
+        phase = {s["id"]: s["phase"] for s in site.species}
+        self.index = index
+        for r in self._spec_reactions:
+            name = str(r.get("name", "reaction"))
+            typ = r.get("type", "first_order")
+            k = float(r.get("k", 0.0))
+            if k < 0:
+                raise ValueError(f"reaction '{name}': k must be >= 0")
+            stoich = {str(s): float(v) for s, v in (r.get("stoich") or {}).items() if float(v) != 0.0}
+            if not stoich:
+                raise ValueError(f"reaction '{name}': give at least one stoichiometric coefficient")
+            for s in stoich:
+                if s not in index:
+                    raise ValueError(f"reaction '{name}': unknown species '{s}'")
+            def terms(key):
+                out = []
+                for t in r.get(key, []) or []:
+                    s = str(t["species"])
+                    if s not in index:
+                        raise ValueError(f"reaction '{name}': unknown species '{s}' in {key}")
+                    K = float(t["K"])
+                    if not K > 0:
+                        raise ValueError(f"reaction '{name}': half-saturation constants must be > 0")
+                    out.append((index[s], K))
+                return out
+            monod, inhib = terms("monod"), terms("inhibition")
+            if typ in ("first_order", "monod"):
+                a = str(r.get("reactant") or (r.get("reactants") or [None])[0])
+                if a not in index:
+                    raise ValueError(f"reaction '{name}': reactant '{a}' unknown")
+                reac, ref = [index[a]], phase[a]
+            elif typ == "mass_action":
+                rs = [str(x) for x in (r.get("reactants") or [])]
+                if not 1 <= len(rs) <= 3 or any(x not in index for x in rs):
+                    raise ValueError(f"reaction '{name}': mass_action needs 1-3 known reactants")
+                reac, ref = [index[x] for x in rs], phase[rs[0]]
+            elif typ == "zero_order":
+                reac, ref = [], r.get("phase", "solute")
+                if any(v < 0 for v in stoich.values()):
+                    raise ValueError(f"reaction '{name}': a zero-order reaction can only produce")
+            elif typ == "per_Corg":
+                pw = r.get("pathway", "total")
+                if pw not in self.PATHWAYS:
+                    raise ValueError(f"reaction '{name}': pathway must be one of {list(self.PATHWAYS)}")
+                reac, ref = [], "solid"
+            else:
+                raise ValueError(f"reaction '{name}': unknown type '{typ}'")
+            if typ != "per_Corg" and typ != "zero_order" and not monod and typ == "monod":
+                pass
+            sto_idx = [(index[s], v, phase[s]) for s, v in stoich.items()]
+            self.reactions.append(dict(name=name, type=typ, k=k, reac=reac, ref=ref, monod=monod,
+                                       inhib=inhib, stoich=sto_idx, pathway=self.PATHWAYS.get(r.get("pathway", "total"), 6)))
 
-        Species(name="DIC", long_name="Dissolved Inorganic Carbon", species_type="solute",
-                D0=0.015179, D_T_coeff=0.000795,
-                bc_top_type="concentration", bc_top_value=2300.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=2350.0, unit="μmol/kg", color="#FF6600"),
-
-        Species(name="ALK", long_name="Alkalinity", species_type="solute",
-                D0=0.015179, D_T_coeff=0.000795,
-                bc_top_type="concentration", bc_top_value=2400.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=2410.0, unit="μmol/kg", color="#FF0066"),
-
-        Species(name="NO3", long_name="Nitrate", species_type="solute",
-                D0=0.030863, D_T_coeff=0.001153,
-                bc_top_type="concentration", bc_top_value=10.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=5.0, unit="μmol/kg", color="#00FF66"),
-
-        Species(name="SO4", long_name="Sulfate", species_type="solute",
-                D0=0.015779, D_T_coeff=0.000712,
-                bc_top_type="concentration", bc_top_value=28000.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=27500.0, unit="μmol/kg", color="#FFFF00"),
-
-        Species(name="NH4", long_name="Ammonium", species_type="solute",
-                D0=0.030926, D_T_coeff=0.001225,
-                bc_top_type="concentration", bc_top_value=0.1,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=1.0, unit="μmol/kg", color="#FF00FF"),
-
-        Species(name="H2S", long_name="Hydrogen Sulfide", species_type="solute",
-                D0=0.028938, D_T_coeff=0.001314,
-                bc_top_type="concentration", bc_top_value=0.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=0.0, unit="μmol/kg", color="#00FFFF"),
-
-        Species(name="Fe2", long_name="Dissolved Iron(II)", species_type="solute",
-                D0=0.010761, D_T_coeff=0.000466,
-                bc_top_type="concentration", bc_top_value=0.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=0.0, unit="μmol/kg", color="#FF6666"),
-
-        Species(name="Mn2", long_name="Dissolved Manganese(II)", species_type="solute",
-                D0=0.009625, D_T_coeff=0.000481,
-                bc_top_type="concentration", bc_top_value=0.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=0.0, unit="μmol/kg", color="#FF9900"),
-
-        Species(name="CH4", long_name="Methane", species_type="solute",
-                D0=0.041629, D_T_coeff=0.000764,
-                bc_top_type="concentration", bc_top_value=0.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=0.0, unit="μmol/kg", color="#9900FF"),
-
-        Species(name="Ca", long_name="Calcium", species_type="solute",
-                D0=0.011771, D_T_coeff=0.000529,
-                bc_top_type="concentration", bc_top_value=10280.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=10250.0, unit="μmol/kg", color="#CCCCCC"),
-
-        # Solids
-        Species(name="OM", long_name="Organic Matter", species_type="solid",
-                D0=0.0, D_T_coeff=0.0,
-                bc_top_type="flux", bc_top_value=10.0,  # 10 mol/m²/yr
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=0.5, unit="wt%", color="#664422"),
-
-        Species(name="calcite", long_name="Calcite", species_type="solid",
-                D0=0.0, D_T_coeff=0.0,
-                bc_top_type="flux", bc_top_value=2.0,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=0.1, unit="wt%", color="#FFFFFF"),
-
-        Species(name="aragonite", long_name="Aragonite", species_type="solid",
-                D0=0.0, D_T_coeff=0.0,
-                bc_top_type="flux", bc_top_value=0.5,
-                bc_bot_type="gradient", bc_bot_value=0.0,
-                initial_value=0.02, unit="wt%", color="#EEEEEE"),
-    ]
-
-    # Reactions
-    reaction_list = [
-        # Aerobic respiration (OM + O2 -> DIC + NH4)
-        Reaction(name="aerobic_respiration", rate_type="inhibited_monod",
-                 rate_constant=10.0,  # [1/yr]
-                 reactants=[("OM", 1.0), ("O2", 1.0)],
-                 products=[("DIC", 1.0), ("NH4", 0.16)],
-                 monod_species="OM", half_saturation=1.0,
-                 inhibitors=[("O2", 100.0)]),
-
-        # Denitrification (OM + NO3 -> DIC + N2, inhibited by O2)
-        Reaction(name="denitrification", rate_type="inhibited_monod",
-                 rate_constant=8.0,
-                 reactants=[("OM", 1.0), ("NO3", 0.8)],
-                 products=[("DIC", 1.0), ("NH4", 0.16)],
-                 monod_species="OM", half_saturation=1.0,
-                 inhibitors=[("O2", 50.0)]),
-
-        # Mn reduction
-        Reaction(name="mn_reduction", rate_type="inhibited_monod",
-                 rate_constant=5.0,
-                 reactants=[("OM", 1.0)],
-                 products=[("DIC", 1.0), ("Mn2", 1.0), ("NH4", 0.16)],
-                 monod_species="OM", half_saturation=1.0,
-                 inhibitors=[("O2", 30.0), ("NO3", 20.0)]),
-
-        # Fe reduction
-        Reaction(name="fe_reduction", rate_type="inhibited_monod",
-                 rate_constant=5.0,
-                 reactants=[("OM", 1.0)],
-                 products=[("DIC", 1.0), ("Fe2", 1.0), ("NH4", 0.16)],
-                 monod_species="OM", half_saturation=1.0,
-                 inhibitors=[("O2", 20.0), ("NO3", 15.0), ("Mn2", 10.0)]),
-
-        # Sulfate reduction
-        Reaction(name="sulfate_reduction", rate_type="inhibited_monod",
-                 rate_constant=3.0,
-                 reactants=[("OM", 1.0), ("SO4", 0.5)],
-                 products=[("DIC", 1.0), ("H2S", 0.5), ("NH4", 0.16)],
-                 monod_species="OM", half_saturation=1.0,
-                 inhibitors=[("O2", 10.0), ("NO3", 8.0), ("Mn2", 5.0), ("Fe2", 5.0)]),
-
-        # Methanogenesis
-        Reaction(name="methanogenesis", rate_type="inhibited_monod",
-                 rate_constant=1.0,
-                 reactants=[("OM", 1.0)],
-                 products=[("DIC", 0.5), ("CH4", 0.5), ("NH4", 0.16)],
-                 monod_species="OM", half_saturation=1.0,
-                 inhibitors=[("O2", 5.0), ("NO3", 4.0), ("Mn2", 2.0),
-                             ("Fe2", 2.0), ("SO4", 2.0)]),
-
-        # Calcite dissolution (Omega-dependent)
-        Reaction(name="calcite_dissolution", rate_type="saturation",
-                 rate_constant=1.0,  # placeholder
-                 reactants=[("calcite", 1.0)],
-                 products=[("Ca", 1.0), ("DIC", 1.0)]),
-
-        # Aragonite dissolution
-        Reaction(name="aragonite_dissolution", rate_type="saturation",
-                 rate_constant=1.0,
-                 reactants=[("aragonite", 1.0)],
-                 products=[("Ca", 1.0), ("DIC", 1.0)]),
-    ]
-
-    # Environment
-    env = Environment(
-        T=1.4, S=34.69, P=4310.0, depth=4400.0, U=0.01,
-        phi0=0.8, phi_inf=0.65, beta=2.0,
-        D_bio_0=1.0e-3, lambda_b=0.05,
-        lambda_i=0.02, alpha0=10.0,
-        depth_sed=0.5, Nz=50,
-        dz_top=1.0e-4, dz_bot=1.0e-2,
-        tspan=(0.0, 1000.0),
-        mode="transient",
-    )
-
-    return RADIModel(species_list, reaction_list, env)
+    def add_rates(self, R, U, D, p2d, cellidx):
+        if not self.reactions:
+            return
+        C = np.maximum(U, 0.0)
+        for rx in self.reactions:
+            if rx["type"] == "per_Corg":
+                rate = rx["k"] * D[rx["pathway"]]
+            else:
+                rate = np.full(U.shape[1], rx["k"])
+                for i in rx["reac"]:
+                    rate = rate * C[i]
+                for i, K in rx["monod"]:
+                    rate = rate * C[i] / (K + C[i])
+                for i, K in rx["inhib"]:
+                    rate = rate * K / (K + C[i])
+            for i, v, ph in rx["stoich"]:
+                if ph == rx["ref"]:
+                    R[i] += v * rate
+                elif rx["ref"] == "solid":       # solid basis -> solute: x phiS/phi
+                    R[i] += v * rate * p2d
+                else:                            # solute basis -> solid: x phi/phiS
+                    R[i] += v * rate / p2d
 
 
-# ============================================================================
-# MAIN / TESTING
-# ============================================================================
+# ---------------------------------------------------------------------------------------------------
+# 6. Residual and Jacobian
+# ---------------------------------------------------------------------------------------------------
+class Model:
+    """Residual F(u) = d(state)/dt and its Jacobian, with the porewater [H+] cache of the Julia engine."""
 
-if __name__ == "__main__":
-    print("Creating W2 benchmark model...")
-    model = create_w2_benchmark()
+    def __init__(self, site):
+        self.site = site
+        Nz, nv = site.Nz, site.nvar
+        self.n = Nz * nv
+        self.H = np.full(Nz, site.H_init)
+        self.cells = np.arange(Nz)
+        # FD-Jacobian batch: column b*Nz + k is cell k, perturbation b (b = 0 base, 1..nv species b-1)
+        self.bcells = np.tile(self.cells, nv + 1)
+        # banded storage indices of the block-diagonal reaction Jacobian (A[i,j] -> ab[nv + i - j, j])
+        a, b = np.meshgrid(np.arange(nv), np.arange(nv), indexing="ij")
+        self.blk_rows = (nv + a - b)[None, :, :].repeat(Nz, axis=0)
+        self.blk_cols = (np.arange(Nz)[:, None, None] * nv + b[None, :, :])
+        self.n_res = 0
+        self.n_jac = 0
+        self.user_rows = np.arange(NCORE, nv) if nv > NCORE else None
+        self.user_scale = None
+        if self.user_rows is not None:
+            sp = site.species[NCORE:]
+            self.user_vol = np.stack([(site.phiS if s["phase"] == "solid" else site.phi) * site.dx for s in sp], axis=1)
+            self.user_rain = np.array([site.rain_of(s["id"]) if s["phase"] == "solid" else 0.0 for s in sp])
 
-    print(f"Model setup: {model.n_species} species, {model.Nz} depth cells")
-    print(f"Solutes: {model.solute_names}")
-    print(f"Solids: {model.solid_names}")
-    print(f"Reactions: {len(model.reaction_list)}")
-    print(f"Estimated runtime: {model.estimate_runtime():.1f} seconds")
+    def refresh_H(self, U, iters=60):
+        self.H = solve_pH(self.site, U, self.H, iters)
+        return self.H
 
-    print("\nSolving...")
-    results = model.solve()
+    def residual(self, uv, pH_iters=60):
+        """F(u): refresh [H+] from the cache (fixed Newton iterations), then rates + transport."""
+        site = self.site
+        U = uv.reshape(site.Nz, site.nvar).T
+        self.refresh_H(U, pH_iters)
+        R, _, _ = all_rates(site, U, self.H, self.cells)
+        self.n_res += 1
+        tr = site.transport(uv)
+        rv = R.T.reshape(-1)
+        if self.user_rows is not None:
+            ur = self.user_rows
+            # throughput of every user species (mol m-2 yr-1): column integral of |reaction| plus its rain
+            Rm = np.abs(rv.reshape(site.Nz, site.nvar)[:, ur])
+            self.user_Q = np.sum(Rm * self.user_vol, axis=0) + self.user_rain
+            # fallback scale when nothing is produced or consumed: gross transport terms
+            S = (site.transport_abs(uv) + np.abs(rv)).reshape(site.Nz, site.nvar)[:, ur]
+            self.user_scale = np.max(S, axis=0)
+        return tr + rv
 
-    print(f"Success: {results['success']}")
-    print(f"Message: {results['message']}")
-    print(f"Time range: {results['solution'].t[0]:.1f} to {results['solution'].t[-1]:.1f} years")
+    def norm(self, F, tol):
+        """Convergence norm. Core species: max |F| (mol m-3 yr-1), exactly the Julia criterion. User species:
+        their column-integrated imbalance relative to their throughput (reaction + rain), so that trace
+        species converge too: imbalance <= RTOL_USER x throughput maps onto the same tolerance."""
+        site = self.site
+        if self.user_rows is None:
+            return float(np.max(np.abs(F)))
+        Fm = F.reshape(site.Nz, site.nvar)
+        r_core = float(np.max(np.abs(Fm[:, :NCORE])))
+        Fu = np.abs(Fm[:, self.user_rows])
+        E = np.sum(Fu * self.user_vol, axis=0)
+        Q = self.user_Q
+        rel_budget = np.where(Q > 0, E / np.maximum(RTOL_USER * Q, 1e-300), 0.0)
+        rel_local = np.where(Q > 0, 0.0, np.max(Fu, axis=0) / np.maximum(RTOL_USER * self.user_scale, 1e-300))
+        rel_local = np.where(np.max(Fu, axis=0) > 0, rel_local, 0.0)
+        r_user = float(np.max(np.maximum(rel_budget, rel_local))) * tol
+        return max(r_core, r_user)
 
-    # Print final profiles for a few key species
-    for sp_name in ["O2", "DIC", "NO3", "SO4", "H2S", "CH4"]:
-        if sp_name in results["species_data"]:
-            profile = results["species_data"][sp_name]["final_profile"]
-            print(f"{sp_name}: min={profile.min():.2e}, max={profile.max():.2e}")
+
+    def reaction_jacobian(self, uv, iters=40):
+        """Block-diagonal reaction Jacobian (Nz, nv, nv) by forward differences, h = 1e-6 max(|u|, 1e-6),
+        with a fresh pH solve for every perturbed state (add_react_jac! / react_cell!)."""
+        site = self.site
+        Nz, nv = site.Nz, site.nvar
+        U = uv.reshape(Nz, nv).T                       # (nv, Nz)
+        h = 1e-6 * np.maximum(np.abs(U), 1e-6)         # (nv, Nz)
+        X = np.repeat(U[:, None, :], nv + 1, axis=1)   # (nv, nv+1, Nz)
+        for j in range(nv):
+            X[j, j + 1, :] = U[j] + h[j]
+        Xf = X.reshape(nv, (nv + 1) * Nz)
+        H = solve_pH(site, Xf, np.tile(self.H, nv + 1), iters)
+        R, _, _ = all_rates(site, Xf, H, self.bcells)
+        R = R.reshape(nv, nv + 1, Nz)
+        # actual perturbation (rounding): X[j, j+1] - U[j] differs from h by ulp; Julia divides by h
+        Jr = (R[:, 1:, :] - R[:, :1, :]) / h[None, :, :]    # (nv, nv, Nz): [row a, col b, cell]
+        self.n_jac += 1
+        return np.transpose(Jr, (2, 0, 1))                   # (Nz, nv, nv)
+
+    def banded(self, Jr, dt=None):
+        """Banded storage (2nv+1, n) of A = (1/dt) I - J, or of J itself when dt is None."""
+        site = self.site
+        nv, n = site.nvar, self.n
+        ab = np.zeros((2 * nv + 1, n))
+        ab[self.blk_rows, self.blk_cols] = Jr
+        ab[nv, :] += site.Tdiag
+        ab[0, nv:] += site.Tup[:-nv]
+        ab[2 * nv, :-nv] += site.Tlow[nv:]
+        if dt is None:
+            return ab
+        ab = -ab
+        ab[nv, :] += 1.0 / dt
+        return ab
+
+
+# ---------------------------------------------------------------------------------------------------
+# 7. Solvers: pseudo-transient continuation (solve_steady_state) and the scheduled march (ptc_sched.jl)
+# ---------------------------------------------------------------------------------------------------
+SCHED_DEFAULT = [(10.0, 30), (100.0, 60), (1e3, 60), (1e4, 40), (1e5, 20)]
+
+
+class _Progress:
+    def __init__(self, cb, every=0.25):
+        self.cb, self.every, self.t0, self.last = cb, every, time.time(), -1.0
+
+    def __call__(self, force=False, **info):
+        if self.cb is None:
+            return
+        t = time.time() - self.t0
+        if force or t - self.last >= self.every:
+            self.last = t
+            info["elapsed"] = t
+            self.cb(info)
+
+
+def ptc(model, u0, tol=0.02, max_iter=1500, dt0=1e-3, dtmax=1e12, dtmin=1e-11, pH_iters=50,
+        stall_limit=60, max_restart=6, solid_step=0.3, progress=None, phase="newton"):
+    """Pseudo-transient continuation; a port of solve_steady_state (same step control)."""
+    site = model.site
+    nv = site.nvar
+    solid = np.tile(site.solid, site.Nz)
+    uv = np.array(u0, dtype=float).reshape(-1).copy()
+    model.refresh_H(uv.reshape(site.Nz, nv).T, 80)
+    F = model.residual(uv, pH_iters)
+    r = model.norm(F, tol)
+    best = uv.copy(); rbest = r
+    dt = dt0; stall = 0; restarts = 0; nrej = 0; it_done = 0; why = "max_iter"
+    for it in range(1, max_iter + 1):
+        if rbest < tol:
+            why = "tol"; break
+        it_done = it
+        Jr = model.reaction_jacobian(uv)
+        ab = model.banded(Jr, dt)
+        try:
+            delta = solve_banded((nv, nv), ab, F, overwrite_ab=True, check_finite=False)
+        except Exception:
+            delta = np.full_like(F, np.nan)
+        if not np.all(np.isfinite(delta)):
+            dt = max(dt * 0.25, dtmin); stall += 1; nrej += 1
+        else:
+            lim = solid_step * np.maximum(np.abs(uv[solid]), 1.0)
+            ad = np.abs(delta[solid])
+            sc = 1.0
+            over = ad > lim
+            if np.any(over):
+                sc = min(1.0, float(np.min(lim[over] / ad[over])))
+            ut = uv + sc * delta
+            ut[solid] = np.maximum(ut[solid], 0.0)
+            Ft = model.residual(ut, pH_iters)
+            rn = model.norm(Ft, tol)
+            if math.isfinite(rn) and rn < 1.5 * r:
+                uv, F, r = ut, Ft, rn
+                dt = min(dt * 2.5, dtmax)
+                if rn < rbest * (1.0 - 1e-6):
+                    best = uv.copy(); rbest = rn; stall = 0
+                else:
+                    stall += 1
+            else:
+                dt = max(dt * 0.25, dtmin); stall += 1; nrej += 1
+        if stall >= stall_limit:
+            restarts += 1
+            if restarts > max_restart:
+                why = "restarts"; break
+            uv = best.copy()
+            F = model.residual(uv, pH_iters); r = rbest
+            dt = dt0; stall = 0
+        if progress:
+            progress(phase=phase, iteration=it, residual=rbest, dt=dt)
+    if rbest < tol:
+        why = "tol"
+    return best, rbest, dict(iterations=it_done, rejected=nrej, restarts=restarts, stop=why)
+
+
+def march(model, u0, sched=SCHED_DEFAULT, tol=0.0, pH_iters=50, progress=None):
+    """Linearised implicit-Euler march on a dt schedule, one Newton step per time step (ptc_sched.jl)."""
+    site = model.site
+    nv = site.nvar
+    solid = np.tile(site.solid, site.Nz)
+    uv = np.array(u0, dtype=float).reshape(-1).copy()
+    model.refresh_H(uv.reshape(site.Nz, nv).T, 80)
+    total = sum(ns for _, ns in sched); done = 0
+    for dt, nsteps in sched:
+        F = model.residual(uv, pH_iters)
+        if model.norm(F, max(tol, 1e-300)) < tol:
+            break
+        for s in range(nsteps):
+            F = model.residual(uv, pH_iters)
+            Jr = model.reaction_jacobian(uv)
+            ab = model.banded(Jr, dt)
+            delta = solve_banded((nv, nv), ab, F, overwrite_ab=True, check_finite=False)
+            if not np.all(np.isfinite(delta)):
+                break
+            uv = uv + delta
+            uv[solid] = np.maximum(uv[solid], 0.0)
+            done += 1
+            if progress:
+                progress(phase="march", step=done, of=total, dt=dt)
+    return uv
+
+
+def cold_start(site):
+    """build_cold_start: every solute at its bottom-water value, solids at modest contents."""
+    Nz, nv = site.Nz, site.nvar
+    U = np.zeros((nv, Nz))
+    rho = site.rho
+    for i, s in enumerate(site.species[:12]):
+        U[i] = site.bw_kg[s["id"]] * rho
+    U[12] = 1.0e2; U[13] = 3.0e2; U[16] = 4.5e3
+    for i, s in enumerate(site.species):
+        if not s["core"] and s["phase"] == "solute":
+            U[i] = site.Cw[s["id"]]
+    return U.T.reshape(-1)
+
+
+def solve(site, seed=None, tol=0.02, max_ptc=250, progress=None):
+    """Steady state of the site. With a seed: PTC first (capped), then the scheduled march + polish from the
+    seed if PTC fails. Without a seed: march + polish from the cold start. Returns (u, info)."""
+    model = Model(site)
+    prog = _Progress(progress)
+    t0 = time.time()
+    attempts = []
+    u_best, r_best = None, float("inf")
+    if seed is not None:
+        u0 = np.asarray(seed, dtype=float).reshape(-1)
+        u, r, inf = ptc(model, u0, tol=tol, max_iter=max_ptc, progress=prog, phase="newton")
+        attempts.append(dict(method="newton", residual=r, **inf))
+        u_best, r_best = u, r
+    else:
+        u0 = cold_start(site)
+    if r_best >= tol:
+        um = march(model, u0, tol=0.2 * tol, progress=prog)
+        u, r, inf = ptc(model, um, tol=tol, max_iter=300, progress=prog, phase="polish")
+        attempts.append(dict(method="march+polish", residual=r, **inf))
+        if r < r_best:
+            u_best, r_best = u, r
+    if r_best < tol:
+        # tighten: a few near-Newton steps from the converged state (closes the budgets of trace species)
+        u, r, inf = ptc(model, u_best, tol=tol * 1e-3, max_iter=25, dt0=1e4, stall_limit=8, max_restart=0,
+                        progress=prog, phase="tighten")
+        F = model.residual(u, 50)
+        r_t = model.norm(F, tol)
+        attempts.append(dict(method="tighten", residual=r_t, **inf))
+        if r_t <= r_best:
+            u_best, r_best = u, r_t
+    prog(force=True, phase="done", residual=r_best)
+    info = dict(converged=bool(r_best < tol), residual=r_best, tol=tol, seconds=time.time() - t0,
+                attempts=attempts, residual_evaluations=model.n_res, jacobians=model.n_jac)
+    return u_best, info
+
+
+# ---------------------------------------------------------------------------------------------------
+# 8. Outputs: profiles, rates, benthic fluxes, column budgets
+# ---------------------------------------------------------------------------------------------------
+def outputs(site, uv, info=None):
+    model = Model(site)
+    Nz, nv, rho = site.Nz, site.nvar, site.rho
+    U = uv.reshape(Nz, nv).T
+    model.refresh_H(U, 100)
+    H = model.H
+    R, D, extra = all_rates(site, U, H, model.cells)
+    F = site.transport(uv) + R.T.reshape(-1)
+    dx, phi, phiS = site.dx, site.phi, site.phiS
+    prof = {"depth_cm": (site.zc * 100).tolist(), "porosity": phi.tolist(),
+            "pH_free": (-np.log10(H / rho)).tolist(), "OmegaCa": extra["OmegaCa"].tolist(),
+            "OmegaAr": extra["OmegaAr"].tolist(), "CO3_umol_kg": (extra["CO3"] / rho * 1e6).tolist()}
+    for i, s in enumerate(site.species):
+        if s["phase"] == "solute":
+            prof[s["id"]] = (U[i] / rho * 1e6).tolist()          # umol/kg
+        else:
+            prof[s["id"]] = U[i].tolist()                         # mol m-3 solid
+    prof["calcite_wt_pct"] = (np.maximum(U[16], 0) * M_CaCO3 / RHO_SOLID * 100).tolist()
+    prof["aragonite_wt_pct"] = (np.maximum(U[17], 0) * M_CaCO3 / RHO_SOLID * 100).tolist()
+    prof["POC_wt_pct"] = ((np.maximum(U[12], 0) + np.maximum(U[13], 0)) * 12.011 / RHO_SOLID * 100).tolist()
+    rates = {"depth_cm": prof["depth_cm"]}
+    for j, name in enumerate(DIAG_NAMES):
+        rates[name] = D[j].tolist()                              # mol C m-3 solid yr-1
+    rates["calcite_dissolution"] = extra["Rdiss_cal"].tolist()   # mol m-3 solid yr-1
+    rates["calcite_precipitation"] = extra["Rprec_cal"].tolist()
+    rates["aragonite_dissolution"] = extra["Rdiss_ar"].tolist()
+    for i, s in enumerate(site.species):
+        rates["net_" + s["id"]] = R[i].tolist()
+    # benthic fluxes: positive = out of the sediment (efflux); O2 also given as uptake
+    flux = {}
+    for i, s in enumerate(site.species):
+        if s["phase"] != "solute":
+            continue
+        sid = s["id"]
+        Cw = site.Cw[sid]
+        G = 1.0 / (site.dbl[sid] / site.Dfree[sid] + 0.5 * dx[0] / (phi[0] * site.Ds[sid][0]))
+        Jin = G * (Cw - U[i, 0]) + phi[0] * site.u_bur[0] * Cw
+        Jin += float(np.sum(site.alpha * (Cw - U[i]) * phi * dx))
+        flux[sid] = -Jin
+    vol_s, vol_d = phiS * dx, phi * dx
+    budget = {
+        "calcite_rain": site.rain["calcite"],
+        "calcite_dissolution": float(np.sum(extra["Rdiss_cal"] * vol_s)),
+        "calcite_precipitation": float(np.sum(extra["Rprec_cal"] * vol_s)),
+        "calcite_burial": float(site.w[-1] * phiS[-1] * max(U[16, -1], 0.0)),
+        "aragonite_rain": site.rain["aragonite"],
+        "aragonite_dissolution": float(np.sum(extra["Rdiss_ar"] * vol_s)),
+        "POC_rain": site.Fpoc,
+        "POC_degradation": float(np.sum(D[6] * vol_s)),
+        "POC_burial": float(site.w[-1] * phiS[-1] * (max(U[12, -1], 0.0) + max(U[13, -1], 0.0))) + site.Froc,
+        "TA_column_source": float(np.sum(R[10] * vol_d)),
+        "O2_column_consumption": float(-np.sum(R[0] * vol_d)),
+    }
+    for j, name in enumerate(DIAG_NAMES[:6]):
+        budget["Corg_" + name] = float(np.sum(D[j] * vol_s))
+    # closures (relative): TA = SWI influx + column source - burial out; calcite = rain - net dissolution - burial
+    TA_in = -flux["TA"]
+    budget["TA_closure"] = (TA_in + budget["TA_column_source"] - phi[-1] * site.u_bur[-1] * U[10, -1]) / max(abs(budget["TA_column_source"]), 1e-12)
+    cal_in = site.rain["calcite"]
+    budget["calcite_closure"] = ((cal_in - (budget["calcite_dissolution"] - budget["calcite_precipitation"]) - budget["calcite_burial"])
+                                 / max(cal_in, 1e-12)) if cal_in > 0 else 0.0
+    opd = None
+    for k in range(Nz):
+        if U[0, k] / rho * 1e6 < 1.0:
+            opd = site.zc[k] * 100; break
+    summary = dict(OPD_cm=opd, rho_sw=rho, omegaCa_bw=site.omegaCa_bw, omegaAr_bw=site.omegaAr_bw,
+                   DBL_um={k: v * 1e6 for k, v in site.dbl.items()}, burial_velocity_cm_kyr=site.w[-1] * 1e5,
+                   bioturbation_D0_cm2_yr=site.D_bio[0] * 1e4, irrigation_alpha0_per_yr=site.alpha_0,
+                   max_abs_residual=float(np.max(np.abs(F))))
+    return dict(version=VERSION, species=[{k: v for k, v in s.items() if k in ("id", "label", "phase", "core")}
+                                          for s in site.species],
+                profiles=prof, rates=rates, fluxes=flux, budget=budget, summary=summary, solver=info or {})
+
+
+# ---------------------------------------------------------------------------------------------------
+# 9. Entry point used by the web worker
+# ---------------------------------------------------------------------------------------------------
+def run(request_json, progress=None):
+    """request = {"config": {...}, "extensions": {...}, "seed": [[...]] (nvar x Nz, optional),
+                  "tol": 0.02}; returns a JSON string with outputs and the final state (to seed the next run)."""
+    req = json.loads(request_json) if isinstance(request_json, str) else request_json
+    site = Site(req.get("config", {}), req.get("extensions"))
+    seed = req.get("seed")
+    u0 = None
+    if seed is not None:
+        S = np.asarray(seed, dtype=float)
+        if S.shape == (site.nvar, site.Nz):
+            u0 = S.T.reshape(-1)
+        elif S.shape[1] == site.Nz and S.shape[0] < site.nvar:      # core seed + new user species
+            full = cold_start(site).reshape(site.Nz, site.nvar).T
+            full[:S.shape[0]] = S
+            u0 = full.T.reshape(-1)
+    u, info = solve(site, u0, tol=float(req.get("tol", 0.02)), progress=progress)
+    out = outputs(site, u, info)
+    out["state"] = u.reshape(site.Nz, site.nvar).T.tolist()
+    return json.dumps(out)
